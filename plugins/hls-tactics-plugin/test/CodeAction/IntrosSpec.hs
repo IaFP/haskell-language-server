@@ -1,4 +1,9 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE DataKinds             #-}
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE ScopedTypeVariables   #-}
+{-# LANGUAGE TypeOperators         #-}
+{-# LANGUAGE ViewPatterns          #-}
 
 module CodeAction.IntrosSpec where
 
@@ -12,8 +17,5 @@ spec = do
   let introsTest = goldenTest Intros ""
 
   describe "golden" $ do
-    introsTest 2 8 "GoldenIntros"
-
-  describe "layout" $ do
-    introsTest 4 24 "LayoutRec"
+    introsTest 2 8 "GoldenIntros.hs"
 

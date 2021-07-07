@@ -7,19 +7,25 @@
 
 module Progress (tests) where
 
+import           Control.Applicative.Combinators
 import           Control.Lens                    hiding ((.=))
+import           Control.Monad.IO.Class
 import           Data.Aeson                      (Value, decode, encode, object,
                                                   toJSON, (.=))
+import           Data.Default
 import           Data.List                       (delete)
 import           Data.Maybe                      (fromJust)
 import           Data.Text                       (Text, pack)
 import           Ide.Plugin.Config
+import           Language.LSP.Test
+import           Language.LSP.Types
 import           Language.LSP.Types.Capabilities
 import qualified Language.LSP.Types.Lens         as L
 import           System.FilePath                 ((</>))
-import           Test.Hls
-import           Test.Hls.Command
-import           Test.Hls.Flags
+import           Test.Hls.Util
+import           Test.Tasty
+import           Test.Tasty.ExpectedFailure      (ignoreTestBecause)
+import           Test.Tasty.HUnit
 
 tests :: TestTree
 tests =
@@ -29,27 +35,27 @@ tests =
             runSession hlsCommand progressCaps "test/testdata" $ do
                 let path = "hlint" </> "ApplyRefact2.hs"
                 _ <- openDoc path "haskell"
-                expectProgressReports [pack ("Setting up hlint (for " ++ path ++ ")"), "Processing", "Indexing"]
-        , requiresEvalPlugin $ testCase "eval plugin sends progress reports" $
+                expectProgressReports [pack ("Setting up hlint (for " ++ path ++ ")"), "Processing"]
+        , testCase "eval plugin sends progress reports" $
             runSession hlsCommand progressCaps "plugins/hls-eval-plugin/test/testdata" $ do
                 doc <- openDoc "T1.hs" "haskell"
-                expectProgressReports ["Setting up testdata (for T1.hs)", "Processing", "Indexing"]
+                expectProgressReports ["Setting up testdata (for T1.hs)", "Processing"]
                 [evalLens] <- getCodeLenses doc
                 let cmd = evalLens ^?! L.command . _Just
                 _ <- sendRequest SWorkspaceExecuteCommand $ ExecuteCommandParams Nothing (cmd ^. L.command) (decode $ encode $ fromJust $ cmd ^. L.arguments)
                 expectProgressReports ["Evaluating"]
-        , requiresOrmoluPlugin $ testCase "ormolu plugin sends progress notifications" $ do
+        , testCase "ormolu plugin sends progress notifications" $ do
             runSession hlsCommand progressCaps "test/testdata/format" $ do
                 sendNotification SWorkspaceDidChangeConfiguration (DidChangeConfigurationParams (formatLspConfig "ormolu"))
                 doc <- openDoc "Format.hs" "haskell"
-                expectProgressReports ["Setting up testdata (for Format.hs)", "Processing", "Indexing"]
+                expectProgressReports ["Setting up testdata (for Format.hs)", "Processing"]
                 _ <- sendRequest STextDocumentFormatting $ DocumentFormattingParams Nothing doc (FormattingOptions 2 True Nothing Nothing Nothing)
                 expectProgressReports ["Formatting Format.hs"]
-        , requiresFourmoluPlugin $ testCase "fourmolu plugin sends progress notifications" $ do
+        , testCase "fourmolu plugin sends progress notifications" $ do
             runSession hlsCommand progressCaps "test/testdata/format" $ do
                 sendNotification SWorkspaceDidChangeConfiguration (DidChangeConfigurationParams (formatLspConfig "fourmolu"))
                 doc <- openDoc "Format.hs" "haskell"
-                expectProgressReports ["Setting up testdata (for Format.hs)", "Processing", "Indexing"]
+                expectProgressReports ["Setting up testdata (for Format.hs)", "Processing"]
                 _ <- sendRequest STextDocumentFormatting $ DocumentFormattingParams Nothing doc (FormattingOptions 2 True Nothing Nothing Nothing)
                 expectProgressReports ["Formatting Format.hs"]
         , ignoreTestBecause "no liquid Haskell support" $
@@ -91,6 +97,7 @@ expectProgressReports xs = expectProgressReports' [] xs
                 CreateM msg ->
                     expectProgressReports' (token msg : tokens) expectedTitles
                 BeginM msg -> do
+                    liftIO $ title msg `expectElem` ("Indexing references from:":xs)
                     liftIO $ token msg `expectElem` tokens
                     expectProgressReports' tokens (delete (title msg) expectedTitles)
                 ProgressM msg -> do

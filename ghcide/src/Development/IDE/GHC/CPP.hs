@@ -12,6 +12,7 @@
 {-# LANGUAGE NamedFieldPuns           #-}
 {-# LANGUAGE NondecreasingIndentation #-}
 {-# OPTIONS_GHC -Wno-incomplete-uni-patterns #-}
+#include "ghc-api-version.h"
 
 -----------------------------------------------------------------------------
 --
@@ -24,17 +25,18 @@
 module Development.IDE.GHC.CPP(doCpp, addOptP)
 where
 
-import           Development.IDE.GHC.Compat as Compat
+import           Development.IDE.GHC.Compat
 import           FileCleanup
+import           Module
 import           Packages
 import           Panic
 import           SysTools
-#if MIN_VERSION_ghc(8,8,2)
+#if MIN_GHC_API_VERSION(8,8,2)
 import           LlvmCodeGen                (llvmVersionList)
-#elif MIN_VERSION_ghc(8,8,0)
+#elif MIN_GHC_API_VERSION(8,8,0)
 import           LlvmCodeGen                (LlvmVersion (..))
 #endif
-#if MIN_VERSION_ghc (8,10,0)
+#if MIN_GHC_API_VERSION (8,10,0)
 import           Fingerprint
 import           ToolSettings
 #endif
@@ -64,7 +66,7 @@ doCpp dflags raw input_fn output_fn = do
     let verbFlags = getVerbFlags dflags
 
     let cpp_prog args | raw       = SysTools.runCpp dflags args
-#if MIN_VERSION_ghc(8,10,0)
+#if MIN_GHC_API_VERSION(8,10,0)
                       | otherwise = SysTools.runCc Nothing
 #else
                       | otherwise = SysTools.runCc
@@ -148,11 +150,11 @@ getBackendDefs :: DynFlags -> IO [String]
 getBackendDefs dflags | hscTarget dflags == HscLlvm = do
     llvmVer <- figureLlvmVersion dflags
     return $ case llvmVer of
-#if MIN_VERSION_ghc(8,8,2)
+#if MIN_GHC_API_VERSION(8,8,2)
                Just v
                  | [m] <- llvmVersionList v -> [ "-D__GLASGOW_HASKELL_LLVM__=" ++ format (m, 0) ]
                  | m:n:_   <- llvmVersionList v -> [ "-D__GLASGOW_HASKELL_LLVM__=" ++ format (m, n) ]
-#elif MIN_VERSION_ghc(8,8,0)
+#elif MIN_GHC_API_VERSION(8,8,0)
                Just (LlvmVersion n) -> [ "-D__GLASGOW_HASKELL_LLVM__=" ++ format (n,0) ]
                Just (LlvmVersionOld m n) -> [ "-D__GLASGOW_HASKELL_LLVM__=" ++ format (m,n) ]
 #else
@@ -168,7 +170,7 @@ getBackendDefs _ =
     return []
 
 addOptP :: String -> DynFlags -> DynFlags
-#if MIN_VERSION_ghc (8,10,0)
+#if MIN_GHC_API_VERSION (8,10,0)
 addOptP f = alterToolSettings $ \s -> s
           { toolSettings_opt_P             = f : toolSettings_opt_P s
           , toolSettings_opt_P_fingerprint = fingerprintStrings (f : toolSettings_opt_P s)
@@ -186,7 +188,7 @@ addOptP opt = onSettings (onOptP (opt:))
 -- ---------------------------------------------------------------------------
 -- Macros (cribbed from Cabal)
 
-generatePackageVersionMacros :: [Compat.PackageConfig] -> String
+generatePackageVersionMacros :: [PackageConfig] -> String
 generatePackageVersionMacros pkgs = concat
   -- Do not add any C-style comments. See #3389.
   [ generateMacros "" pkgname version
@@ -219,7 +221,7 @@ getGhcVersionPathName dflags = do
   candidates <- case ghcVersionFile dflags of
     Just path -> return [path]
     Nothing -> (map (</> "ghcversion.h")) <$>
-               (getPackageIncludePath dflags [Compat.toInstalledUnitId Compat.rtsUnit])
+               (getPackageIncludePath dflags [toInstalledUnitId rtsUnitId])
 
   found <- filterM doesFileExist candidates
   case found of

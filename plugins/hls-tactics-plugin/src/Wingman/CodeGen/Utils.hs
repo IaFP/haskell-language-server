@@ -1,11 +1,10 @@
 module Wingman.CodeGen.Utils where
 
-import ConLike (ConLike(RealDataCon), conLikeName)
 import Data.List
 import DataCon
 import Development.IDE.GHC.Compat
 import GHC.Exts
-import GHC.SourceGen (RdrNameStr (UnqualStr), recordConE, string)
+import GHC.SourceGen (RdrNameStr, recordConE, string)
 import GHC.SourceGen.Overloaded
 import GhcPlugins (nilDataCon, charTy, eqType)
 import Name
@@ -14,36 +13,29 @@ import Wingman.GHC (getRecordFields)
 
 ------------------------------------------------------------------------------
 -- | Make a data constructor with the given arguments.
-mkCon :: ConLike -> [Type] -> [LHsExpr GhcPs] -> LHsExpr GhcPs
-mkCon con apps (fmap unLoc -> args)
-  | RealDataCon dcon <- con
-  , dcon == nilDataCon
+mkCon :: DataCon -> [Type] -> [LHsExpr GhcPs] -> LHsExpr GhcPs
+mkCon dcon apps (fmap unLoc -> args)
+  | dcon == nilDataCon
   , [ty] <- apps
   , ty `eqType` charTy = noLoc $ string ""
-
-  | RealDataCon dcon <- con
-  , isTupleDataCon dcon =
+  | isTupleDataCon dcon =
       noLoc $ tuple args
-
-  | RealDataCon dcon <- con
-  , dataConIsInfix dcon
+  | dataConIsInfix dcon
   , (lhs : rhs : args') <- args =
-      noLoc $ foldl' (@@) (op lhs (coerceName con_name) rhs) args'
-
-  | Just fields <- getRecordFields con
+      noLoc $ foldl' (@@) (op lhs (coerceName dcon_name) rhs) args'
+  | Just fields <- getRecordFields dcon
   , length fields >= 2 =  --  record notation is unnatural on single field ctors
-      noLoc $ recordConE (coerceName con_name) $ do
+      noLoc $ recordConE (coerceName dcon_name) $ do
         (arg, (field, _)) <- zip args fields
         pure (coerceName field, arg)
-
   | otherwise =
-      noLoc $ foldl' (@@) (bvar' $ occName con_name) args
+      noLoc $ foldl' (@@) (bvar' $ occName dcon_name) args
   where
-    con_name = conLikeName con
+    dcon_name = dataConName dcon
 
 
 coerceName :: HasOccName a => a -> RdrNameStr
-coerceName = UnqualStr . fromString . occNameString . occName
+coerceName = fromString . occNameString . occName
 
 
 ------------------------------------------------------------------------------

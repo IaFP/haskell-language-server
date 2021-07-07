@@ -6,7 +6,6 @@
 {-# LANGUAGE GADTs                 #-}
 {-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE MagicHash             #-}
-{-# LANGUAGE NamedFieldPuns        #-}
 {-# LANGUAGE OverloadedStrings     #-}
 {-# LANGUAGE RankNTypes            #-}
 {-# LANGUAGE RecordWildCards       #-}
@@ -24,8 +23,7 @@ where
 import           Control.Applicative             (Alternative ((<|>)))
 import           Control.Arrow
 import qualified Control.Foldl                   as L
-import           Control.Lens                    (Identity (..), ix, view, (%~),
-                                                  (<&>), (^.))
+import           Control.Lens                    (ix, view, (%~), (<&>), (^.))
 import           Control.Monad
 import           Control.Monad.Extra             (eitherM)
 import qualified Control.Monad.Fail              as Fail
@@ -101,7 +99,7 @@ expandTHSplice _eStyle ideState params@ExpandSpliceParams {..} = do
             reportEditor
                 MtWarning
                 [ "Expansion in type-chcking phase failed;"
-                , "trying to expand manually, but note that it is less rigorous."
+                , "trying to expand manually, but note taht it is less rigorous."
                 ]
             pm <-
                 liftIO $
@@ -240,8 +238,8 @@ setupDynFlagsForGHCiLike env dflags = do
     initializePlugins env dflags4
 
 adjustToRange :: Uri -> Range -> WorkspaceEdit -> WorkspaceEdit
-adjustToRange uri ran (WorkspaceEdit mhult mlt x) =
-    WorkspaceEdit (adjustWS <$> mhult) (fmap adjustDoc <$> mlt) x
+adjustToRange uri ran (WorkspaceEdit mhult mlt) =
+    WorkspaceEdit (adjustWS <$> mhult) (fmap adjustDoc <$> mlt)
     where
         adjustTextEdits :: Traversable f => f TextEdit -> f TextEdit
         adjustTextEdits eds =
@@ -250,21 +248,12 @@ adjustToRange uri ran (WorkspaceEdit mhult mlt x) =
                         (L.premap (view J.range) L.minimum)
                         eds
              in adjustLine minStart <$> eds
-
-        adjustATextEdits :: Traversable f => f (TextEdit |? AnnotatedTextEdit) -> f (TextEdit |? AnnotatedTextEdit)
-        adjustATextEdits = fmap $ \case
-          InL t -> InL $ runIdentity $ adjustTextEdits (Identity t)
-          InR AnnotatedTextEdit{_range, _newText, _annotationId} ->
-            let oldTE = TextEdit{_range,_newText}
-              in let TextEdit{_range,_newText} = runIdentity $ adjustTextEdits (Identity oldTE)
-                in InR $ AnnotatedTextEdit{_range,_newText,_annotationId}
-
         adjustWS = ix uri %~ adjustTextEdits
         adjustDoc :: DocumentChange -> DocumentChange
         adjustDoc (InR es) = InR es
         adjustDoc (InL es)
             | es ^. J.textDocument . J.uri == uri =
-                InL $ es & J.edits %~ adjustATextEdits
+                InL $ es & J.edits %~ adjustTextEdits
             | otherwise = InL es
 
         adjustLine :: Range -> TextEdit -> TextEdit
@@ -416,7 +405,7 @@ codeAction state plId (CodeActionParams _ _ docId ran _) = liftIO $
                             act = mkLspCommand plId cmdId title (Just [toJSON params])
                         pure $
                             InR $
-                                CodeAction title (Just CodeActionRefactorRewrite) Nothing Nothing Nothing Nothing (Just act) Nothing
+                                CodeAction title (Just CodeActionRefactorRewrite) Nothing Nothing Nothing Nothing (Just act)
 
             pure $ maybe mempty List mcmds
     where

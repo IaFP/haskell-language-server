@@ -2,12 +2,14 @@
 {-# LANGUAGE GADTs      #-}
 {-# LANGUAGE MultiWayIf #-}
 
+#include "ghc-api-version.h"
 
 -- Mostly taken from "haskell-ide-engine"
 module Development.IDE.Plugin.Completions.Logic (
   CachedCompletions
 , cacheDataProducer
 , localCompletionsForParsedModule
+, WithSnippets(..)
 , getCompletions
 ) where
 
@@ -28,7 +30,7 @@ import           HscTypes
 import           Name
 import           RdrName
 import           Type
-#if MIN_VERSION_ghc(8,10,0)
+#if MIN_GHC_API_VERSION(8,10,0)
 import           Coercion
 import           Pair
 import           Predicate                                (isDictTy)
@@ -54,12 +56,12 @@ import           Development.IDE.Types.Options
 import           GhcPlugins                               (flLabel, unpackFS)
 import           Ide.PluginUtils                          (mkLspCommand)
 import           Ide.Types                                (CommandId (..),
-                                                           PluginId)
+                                                           PluginId,
+                                                           WithSnippets (..))
 import           Language.LSP.Types
 import           Language.LSP.Types.Capabilities
 import qualified Language.LSP.VFS                         as VFS
 import           Outputable                               (Outputable)
-import           TyCoRep
 
 -- From haskell-ide-engine/hie-plugin-api/Haskell/Ide/Engine/Context.hs
 
@@ -143,7 +145,7 @@ occNameToComKind ty oc
   | isTcOcc   oc = case ty of
                      Just t
                        | "Constraint" `T.isSuffixOf` t
-                       -> CiInterface
+                       -> CiClass
                      _ -> CiStruct
   | isDataOcc oc = CiConstructor
   | otherwise    = CiVariable
@@ -186,7 +188,6 @@ mkCompl
                   _filterText = Nothing,
                   _insertText = Just insertText,
                   _insertTextFormat = Just Snippet,
-                  _insertTextMode = Nothing,
                   _textEdit = Nothing,
                   _additionalTextEdits = Nothing,
                   _commitCharacters = Nothing,
@@ -247,16 +248,9 @@ mkNameCompItem doc thingParent origName origMod thingType isInfix docs !imp = CI
       where
         argTypes = getArgs typ
         argText :: T.Text
-        argText = mconcat $ List.intersperse " " $ zipWithFrom snippet 1 argTypes
+        argText =  mconcat $ List.intersperse " " $ zipWithFrom snippet 1 argTypes
         snippet :: Int -> Type -> T.Text
-        snippet i t = case t of
-            (TyVarTy _)     -> noParensSnippet
-            (LitTy _)       -> noParensSnippet
-            (TyConApp _ []) -> noParensSnippet
-            _               -> snippetText i ("(" <> showGhc t <> ")")
-            where
-                noParensSnippet = snippetText i (showGhc t)
-                snippetText i t = "${" <> T.pack (show i) <> ":" <> t <> "}"
+        snippet i t = "${" <> T.pack (show i) <> ":" <> showGhc t <> "}"
         getArgs :: Type -> [Type]
         getArgs t
           | isPredTy t = []
@@ -266,9 +260,9 @@ mkNameCompItem doc thingParent origName origMod thingType isInfix docs !imp = CI
             let (args, ret) = splitFunTys t
               in if isForAllTy ret
                   then getArgs ret
-                  else Prelude.filter (not . isDictTy) $ map scaledThing args
+                  else Prelude.filter (not . isDictTy) args
           | isPiTy t = getArgs $ snd (splitPiTys t)
-#if MIN_VERSION_ghc(8,10,0)
+#if MIN_GHC_API_VERSION(8,10,0)
           | Just (Pair _ t) <- coercionKind <$> isCoercionTy_maybe t
           = getArgs t
 #else
@@ -280,13 +274,13 @@ mkModCompl :: T.Text -> CompletionItem
 mkModCompl label =
   CompletionItem label (Just CiModule) Nothing Nothing
     Nothing Nothing Nothing Nothing Nothing Nothing Nothing
-    Nothing Nothing Nothing Nothing Nothing Nothing
+    Nothing Nothing Nothing Nothing Nothing
 
 mkImportCompl :: T.Text -> T.Text -> CompletionItem
 mkImportCompl enteredQual label =
   CompletionItem m (Just CiModule) Nothing (Just label)
     Nothing Nothing Nothing Nothing Nothing Nothing Nothing
-    Nothing Nothing Nothing Nothing Nothing Nothing
+    Nothing Nothing Nothing Nothing Nothing
   where
     m = fromMaybe "" (T.stripPrefix enteredQual label)
 
@@ -294,13 +288,13 @@ mkExtCompl :: T.Text -> CompletionItem
 mkExtCompl label =
   CompletionItem label (Just CiKeyword) Nothing Nothing
     Nothing Nothing Nothing Nothing Nothing Nothing Nothing
-    Nothing Nothing Nothing Nothing Nothing Nothing
+    Nothing Nothing Nothing Nothing Nothing
 
 mkPragmaCompl :: T.Text -> T.Text -> CompletionItem
 mkPragmaCompl label insertText =
   CompletionItem label (Just CiKeyword) Nothing Nothing
     Nothing Nothing Nothing Nothing Nothing (Just insertText) (Just Snippet)
-    Nothing Nothing Nothing Nothing Nothing Nothing
+    Nothing Nothing Nothing Nothing Nothing
 
 
 cacheDataProducer :: Uri -> HscEnvEq -> Module -> GlobalRdrEnv-> GlobalRdrEnv -> [LImportDecl GhcPs] -> IO CachedCompletions
@@ -309,7 +303,7 @@ cacheDataProducer uri env curMod globalEnv inScopeEnv limports = do
       packageState = hscEnv env
       curModName = moduleName curMod
 
-      importMap = Map.fromList [ (l, imp) | imp@(L (OldRealSrcSpan l) _) <- limports ]
+      importMap = Map.fromList [ (getLoc imp, imp) | imp <- limports ]
 
       iDeclToModName :: ImportDecl name -> ModuleName
       iDeclToModName = unLoc . ideclName
@@ -337,12 +331,8 @@ cacheDataProducer uri env curMod globalEnv inScopeEnv limports = do
           (, mempty) <$> toCompItem par curMod curModName n Nothing
       getComplsForOne (GRE n par False prov) =
         flip foldMapM (map is_decl prov) $ \spec -> do
-          let originalImportDecl = do
-                -- we don't want to extend import if it's already in scope
-                guard . null $ lookupGRE_Name inScopeEnv n
-                -- or if it doesn't have a real location
-                loc <- realSpan $ is_dloc spec
-                Map.lookup loc importMap
+          -- we don't want to extend import if it's already in scope
+          let originalImportDecl = if null $ lookupGRE_Name inScopeEnv n then Map.lookup (is_dloc spec) importMap else Nothing
           compItem <- toCompItem par curMod (is_mod spec) n originalImportDecl
           let unqual
                 | is_qual spec = []
@@ -416,9 +406,9 @@ localCompletionsForParsedModule uri pm@ParsedModule{pm_parsed_source = L _ HsMod
                 [mkComp id CiVariable Nothing
                 | VarPat _ id <- listify (\(_ :: Pat GhcPs) -> True) pat_lhs]
             TyClD _ ClassDecl{tcdLName, tcdSigs} ->
-                mkComp tcdLName CiInterface Nothing :
+                mkComp tcdLName CiClass Nothing :
                 [ mkComp id CiFunction (Just $ ppr typ)
-                | L _ (ClassOpSig _ _ ids typ) <- tcdSigs
+                | L _ (TypeSig _ ids typ) <- tcdSigs
                 , id <- ids]
             TyClD _ x ->
                 let generalCompls = [mkComp id cl Nothing
@@ -438,7 +428,7 @@ localCompletionsForParsedModule uri pm@ParsedModule{pm_parsed_source = L _ HsMod
         ]
 
     mkComp n ctyp ty =
-        CI ctyp pn (Right thisModName) ty pn Nothing doc (ctyp `elem` [CiStruct, CiInterface]) Nothing
+        CI ctyp pn (Right thisModName) ty pn Nothing doc (ctyp `elem` [CiStruct, CiClass]) Nothing
       where
         pn = ppr n
         doc = SpanDocText (getDocumentation [pm] n) (SpanDocUris Nothing Nothing)
@@ -475,16 +465,12 @@ findRecordCompl _ _ _ _ = []
 ppr :: Outputable a => a -> T.Text
 ppr = T.pack . prettyPrint
 
-toggleSnippets :: ClientCapabilities -> CompletionsConfig -> CompletionItem -> CompletionItem
-toggleSnippets ClientCapabilities {_textDocument} (CompletionsConfig with _) =
+toggleSnippets :: ClientCapabilities -> WithSnippets -> CompletionItem -> CompletionItem
+toggleSnippets ClientCapabilities {_textDocument} (WithSnippets with) =
   removeSnippetsWhen (not $ with && supported)
   where
     supported =
       Just True == (_textDocument >>= _completion >>= _completionItem >>= _snippetSupport)
-
-toggleAutoExtend :: CompletionsConfig -> CompItem -> CompItem
-toggleAutoExtend (CompletionsConfig _ False) x = x {additionalTextEdits = Nothing}
-toggleAutoExtend _ x = x
 
 removeSnippetsWhen :: Bool -> CompletionItem -> CompletionItem
 removeSnippetsWhen condition x =
@@ -505,10 +491,10 @@ getCompletions
     -> (Bindings, PositionMapping)
     -> VFS.PosPrefixInfo
     -> ClientCapabilities
-    -> CompletionsConfig
+    -> WithSnippets
     -> IO [CompletionItem]
 getCompletions plId ideOpts CC {allModNamesAsNS, unqualCompls, qualCompls, importableModules}
-               maybe_parsed (localBindings, bmapping) prefixInfo caps config = do
+               maybe_parsed (localBindings, bmapping) prefixInfo caps withSnippets = do
   let VFS.PosPrefixInfo { fullLine, prefixModule, prefixText } = prefixInfo
       enteredQual = if T.null prefixModule then "" else prefixModule <> "."
       fullPrefix  = enteredQual <> prefixText
@@ -544,7 +530,7 @@ getCompletions plId ideOpts CC {allModNamesAsNS, unqualCompls, qualCompls, impor
                         Just ValueContext -> filter (not . isTypeCompl) compls
                         Just _            -> filter (not . isTypeCompl) compls
           -- Add whether the text to insert has backticks
-          ctxCompls = map (\comp -> toggleAutoExtend config $ comp { isInfix = infixCompls }) ctxCompls'
+          ctxCompls = map (\comp -> comp { isInfix = infixCompls }) ctxCompls'
 
           infixCompls :: Maybe Backtick
           infixCompls = isUsedAsInfix fullLine prefixModule prefixText pos
@@ -576,7 +562,7 @@ getCompletions plId ideOpts CC {allModNamesAsNS, unqualCompls, qualCompls, impor
         ]
 
       filtListWithSnippet f list suffix =
-        [ toggleSnippets caps config (f label (snippet <> suffix))
+        [ toggleSnippets caps withSnippets (f label (snippet <> suffix))
         | (snippet, label) <- list
         , Fuzzy.test fullPrefix label
         ]
@@ -610,7 +596,7 @@ getCompletions plId ideOpts CC {allModNamesAsNS, unqualCompls, qualCompls, impor
         compls <- mapM (mkCompl plId ideOpts) uniqueFiltCompls
         return $ filtModNameCompls
               ++ filtKeywordCompls
-              ++ map (toggleSnippets caps config) compls
+              ++ map ( toggleSnippets caps withSnippets) compls
 
 
 -- ---------------------------------------------------------------------

@@ -2,12 +2,18 @@
 
 module FunctionalLiquid (tests) where
 
-import           Control.Lens            hiding (List)
+import           Control.Lens               hiding (List)
+import           Control.Monad.IO.Class
 import           Data.Aeson
+import           Data.Default
 import           Ide.Plugin.Config
-import           Language.LSP.Types.Lens as LSP hiding (contents)
-import           Test.Hls
-import           Test.Hls.Command
+import           Language.LSP.Test          hiding (message)
+import           Language.LSP.Types         as LSP
+import           Language.LSP.Types.Lens    as LSP hiding (contents)
+import           Test.Hls.Util
+import           Test.Tasty
+import           Test.Tasty.ExpectedFailure (ignoreTestBecause)
+import           Test.Tasty.HUnit
 
 -- ---------------------------------------------------------------------
 

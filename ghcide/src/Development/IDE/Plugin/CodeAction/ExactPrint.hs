@@ -11,10 +11,13 @@ module Development.IDE.Plugin.CodeAction.ExactPrint (
 
   -- * Utilities
   appendConstraint,
-  removeConstraint,
   extendImport,
+  hideImplicitPreludeSymbol,
   hideSymbol,
   liftParseAST,
+  newImport,
+  newUnqualImport,
+  newImportAll,
 ) where
 
 import           Control.Applicative
@@ -36,14 +39,20 @@ import           Development.IDE.GHC.ExactPrint        (ASTElement (parseAST),
 import           Development.IDE.Spans.Common
 import           FieldLabel                            (flLabel)
 import           GHC.Exts                              (IsList (fromList))
-import           GhcPlugins                            (mkRdrUnqual, sigPrec)
+import           GhcPlugins                            (mkRealSrcLoc,
+                                                        realSrcSpanStart,
+                                                        sigPrec)
 import           Language.Haskell.GHC.ExactPrint
 import           Language.Haskell.GHC.ExactPrint.Types (DeltaPos (DP),
                                                         KeywordId (G), mkAnnKey)
 import           Language.LSP.Types
 import           OccName
-import           Outputable                            (ppr, showSDocUnsafe)
-import           Retrie.GHC                            (rdrNameOcc, unpackFS)
+import           Outputable                            (ppr, showSDoc,
+                                                        showSDocUnsafe)
+import           Retrie.GHC                            (mkRealSrcSpan,
+                                                        rdrNameOcc,
+                                                        realSrcSpanEnd,
+                                                        unpackFS)
 
 ------------------------------------------------------------------------------
 
@@ -84,7 +93,6 @@ rewriteToWEdit dflags uri anns r = do
     WorkspaceEdit
       { _changes = Just (fromList [(uri, List edits)])
       , _documentChanges = Nothing
-      , _changeAnnotations = Nothing
       }
 
 ------------------------------------------------------------------------------
@@ -119,22 +127,6 @@ fixParens openDP closeDP ctxt@(L _ elems) = do
   dropHsParTy :: LHsType pass -> LHsType pass
   dropHsParTy (L _ (HsParTy _ ty)) = ty
   dropHsParTy other                = other
-
-removeConstraint ::
-  -- | Predicate: Which context to drop.
-  (LHsType GhcPs -> Bool) ->
-  LHsType GhcPs ->
-  Rewrite
-removeConstraint toRemove = go
-  where
-    go (L l it@HsQualTy{hst_ctxt = L l' ctxt, hst_body}) = Rewrite l $ \_ -> do
-      let ctxt' = L l' $ filter (not . toRemove) ctxt
-      when ((toRemove <$> headMaybe ctxt) == Just True) $
-        setEntryDPT hst_body (DP (0, 0))
-      return $ L l $ it{hst_ctxt = ctxt'}
-    go (L _ (HsParTy _ ty)) = go ty
-    go (L _ HsForAllTy{hst_body}) = go hst_body
-    go (L l other) = Rewrite l $ \_ -> return $ L l other
 
 -- | Append a constraint at the end of a type context.
 --   If no context is present, a new one will be created.
@@ -217,48 +209,44 @@ extendImport mparent identifier lDecl@(L l _) =
   Rewrite l $ \df -> do
     case mparent of
       Just parent -> extendImportViaParent df parent identifier lDecl
-      _           -> extendImportTopLevel identifier lDecl
+      _           -> extendImportTopLevel df identifier lDecl
 
--- | Add an identifier or a data type to import list
+-- | Add an identifier to import list
 --
 -- extendImportTopLevel "foo" AST:
 --
 -- import A --> Error
 -- import A (foo) --> Error
 -- import A (bar) --> import A (bar, foo)
-extendImportTopLevel ::
-  -- | rendered
-  String ->
-  LImportDecl GhcPs ->
-  TransformT (Either String) (LImportDecl GhcPs)
-extendImportTopLevel thing (L l it@ImportDecl{..})
+extendImportTopLevel :: DynFlags -> String -> LImportDecl GhcPs -> TransformT (Either String) (LImportDecl GhcPs)
+extendImportTopLevel df idnetifier (L l it@ImportDecl{..})
   | Just (hide, L l' lies) <- ideclHiding
     , hasSibling <- not $ null lies = do
     src <- uniqueSrcSpanT
     top <- uniqueSrcSpanT
-    let rdr = L src $ mkRdrUnqual $ mkVarOcc thing
+    rdr <- liftParseAST df idnetifier
 
     let alreadyImported =
           showNameWithoutUniques (occName (unLoc rdr))
             `elem` map (showNameWithoutUniques @OccName) (listify (const True) lies)
     when alreadyImported $
-      lift (Left $ thing <> " already imported")
+      lift (Left $ idnetifier <> " already imported")
 
     let lie = L src $ IEName rdr
         x = L top $ IEVar noExtField lie
     if x `elem` lies
-      then lift (Left $ thing <> " already imported")
+      then lift (Left $ idnetifier <> " already imported")
       else do
         when hasSibling $
           addTrailingCommaT (last lies)
         addSimpleAnnT x (DP (0, if hasSibling then 1 else 0)) []
-        addSimpleAnnT rdr dp00 [(G AnnVal, dp00)]
+        addSimpleAnnT rdr dp00 $ unqalDP $ hasParen idnetifier
         -- Parens are attachted to `lies`, so if `lies` was empty previously,
         -- we need change the ann key from `[]` to `:` to keep parens and other anns.
         unless hasSibling $
           transferAnn (L l' lies) (L l' [x]) id
         return $ L l it{ideclHiding = Just (hide, L l' $ lies ++ [x])}
-extendImportTopLevel _ _ = lift $ Left "Unable to extend the import list"
+extendImportTopLevel _ _ _ = lift $ Left "Unable to extend the import list"
 
 -- | Add an identifier with its parent to import list
 --
@@ -270,14 +258,7 @@ extendImportTopLevel _ _ = lift $ Left "Unable to extend the import list"
 -- import A () --> import A (Bar(Cons))
 -- import A (Foo, Bar) --> import A (Foo, Bar(Cons))
 -- import A (Foo, Bar()) --> import A (Foo, Bar(Cons))
-extendImportViaParent ::
-  DynFlags ->
-  -- | parent (already parenthesized if needs)
-  String ->
-  -- | rendered child
-  String ->
-  LImportDecl GhcPs ->
-  TransformT (Either String) (LImportDecl GhcPs)
+extendImportViaParent :: DynFlags -> String -> String -> LImportDecl GhcPs -> TransformT (Either String) (LImportDecl GhcPs)
 extendImportViaParent df parent child (L l it@ImportDecl{..})
   | Just (hide, L l' lies) <- ideclHiding = go hide l' [] lies
  where
@@ -288,8 +269,8 @@ extendImportViaParent df parent child (L l it@ImportDecl{..})
     -- ThingAbs ie => ThingWith ie child
     | parent == unIEWrappedName ie = do
       srcChild <- uniqueSrcSpanT
-      let childRdr = L srcChild $ mkRdrUnqual $ mkVarOcc child
-          childLIE = L srcChild $ IEName childRdr
+      childRdr <- liftParseAST df child
+      let childLIE = L srcChild $ IEName childRdr
           x :: LIE GhcPs = L ll' $ IEThingWith noExtField absIE NoIEWildcard [childLIE] []
       -- take anns from ThingAbs, and attatch parens to it
       transferAnn lAbs x $ \old -> old{annsDP = annsDP old ++ [(G AnnOpenP, DP (0, 1)), (G AnnCloseP, dp00)]}
@@ -301,7 +282,7 @@ extendImportViaParent df parent child (L l it@ImportDecl{..})
       , hasSibling <- not $ null lies' =
       do
         srcChild <- uniqueSrcSpanT
-        let childRdr = L srcChild $ mkRdrUnqual $ mkVarOcc child
+        childRdr <- liftParseAST df child
 
         let alreadyImported =
               showNameWithoutUniques (occName (unLoc childRdr))
@@ -312,7 +293,7 @@ extendImportViaParent df parent child (L l it@ImportDecl{..})
         when hasSibling $
           addTrailingCommaT (last lies')
         let childLIE = L srcChild $ IEName childRdr
-        addSimpleAnnT childRdr (DP (0, if hasSibling then 1 else 0)) [(G AnnVal, dp00)]
+        addSimpleAnnT childRdr (DP (0, if hasSibling then 1 else 0)) $ unqalDP $ hasParen child
         return $ L l it{ideclHiding = Just (hide, L l' $ reverse pre ++ [L l'' (IEThingWith noExtField twIE NoIEWildcard (lies' ++ [childLIE]) [])] ++ xs)}
   go hide l' pre (x : xs) = go hide l' (x : pre) xs
   go hide l' pre []
@@ -322,18 +303,14 @@ extendImportViaParent df parent child (L l it@ImportDecl{..})
       srcParent <- uniqueSrcSpanT
       srcChild <- uniqueSrcSpanT
       parentRdr <- liftParseAST df parent
-      let childRdr = L srcChild $ mkRdrUnqual $ mkVarOcc child
-          isParentOperator = hasParen parent
+      childRdr <- liftParseAST df child
       when hasSibling $
         addTrailingCommaT (head pre)
-      let parentLIE = L srcParent $ (if isParentOperator then IEType else IEName) parentRdr
+      let parentLIE = L srcParent $ IEName parentRdr
           childLIE = L srcChild $ IEName childRdr
           x :: LIE GhcPs = L l'' $ IEThingWith noExtField parentLIE NoIEWildcard [childLIE] []
-      -- Add AnnType for the parent if it's parenthesized (type operator)
-      when isParentOperator $
-        addSimpleAnnT parentLIE (DP (0, 0)) [(G AnnType, DP (0, 0))]
-      addSimpleAnnT parentRdr (DP (0, if hasSibling then 1 else 0)) $ unqalDP 1 isParentOperator
-      addSimpleAnnT childRdr (DP (0, 0)) [(G AnnVal, dp00)]
+      addSimpleAnnT parentRdr (DP (0, if hasSibling then 1 else 0)) $ unqalDP $ hasParen parent
+      addSimpleAnnT childRdr (DP (0, 0)) $ unqalDP $ hasParen child
       addSimpleAnnT x (DP (0, 0)) [(G AnnOpenP, DP (0, 1)), (G AnnCloseP, DP (0, 0))]
       -- Parens are attachted to `pre`, so if `pre` was empty previously,
       -- we need change the ann key from `[]` to `:` to keep parens and other anns.
@@ -349,10 +326,10 @@ hasParen :: String -> Bool
 hasParen ('(' : _) = True
 hasParen _         = False
 
-unqalDP :: Int -> Bool -> [(KeywordId, DeltaPos)]
-unqalDP c paren =
+unqalDP :: Bool -> [(KeywordId, DeltaPos)]
+unqalDP paren =
   ( if paren
-      then \x -> (G AnnOpenP, DP (0, c)) : x : [(G AnnCloseP, dp00)]
+      then \x -> (G AnnOpenP, dp00) : x : [(G AnnCloseP, dp00)]
       else pure
   )
     (G AnnVal, dp00)
@@ -396,7 +373,7 @@ extendHiding symbol (L l idecls) mlies df = do
       , (G AnnCloseP, DP (0, 0))
       ]
   addSimpleAnnT x (DP (0, 0)) []
-  addSimpleAnnT rdr dp00 $ unqalDP 0 $ isOperator $ unLoc rdr
+  addSimpleAnnT rdr dp00 $ unqalDP $ isOperator $ unLoc rdr
   if hasSibling
     then when hasSibling $ do
       addTrailingCommaT x
@@ -455,3 +432,69 @@ deleteFromImport (T.pack -> symbol) (L l idecl) llies@(L lieLoc lies) _ = do
             (filter ((/= symbol) . unqualIEWrapName . unLoc) cons)
             (filter ((/= symbol) . T.pack . unpackFS . flLabel . unLoc) flds)
   killLie v = Just v
+
+-- | Insert a import declaration with at most one symbol
+
+-- newImport "A" (Just "Bar(Cons)") Nothing False --> import A (Bar(Cons))
+-- newImport "A" (Just "foo") Nothing True --> import A hiding (foo)
+-- newImport "A" Nothing (Just "Q") False --> import qualified A as Q
+--
+-- Wrong combinations will result in parse error
+-- Returns Nothing if there is no imports and declarations
+newImport ::
+  -- | module name
+  String ->
+  -- | the symbol
+  Maybe String ->
+  -- | whether to be qualified
+  Maybe String ->
+  -- | the symbol is to be imported or hidden
+  Bool ->
+  ParsedSource ->
+  Maybe Rewrite
+newImport modName mSymbol mQual hiding (L _ HsModule{..}) = do
+  -- TODO (berberman): if the previous line is module name and there is no other imports,
+  -- 'AnnWhere' will be crowded out to the next line, which is a bug
+  let predLine old =
+        mkRealSrcLoc
+          (srcLocFile old)
+          (srcLocLine old - 1)
+          (srcLocCol old)
+      existingImpSpan = (fmap (realSrcSpanEnd,) . realSpan . getLoc) =<< lastMaybe hsmodImports
+      existingDeclSpan = (fmap (predLine . realSrcSpanStart,) . realSpan . getLoc) =<< headMaybe hsmodDecls
+  (f, s) <- existingImpSpan <|> existingDeclSpan
+  let beg = f s
+      indentation = srcSpanStartCol s
+      ran = RealSrcSpan $ mkRealSrcSpan beg beg
+  pure $
+    Rewrite ran $ \df -> do
+      let symImp
+            | Just symbol <- mSymbol
+              , symOcc <- mkVarOcc symbol =
+              "(" <> showSDoc df (parenSymOcc symOcc $ ppr symOcc) <> ")"
+            | otherwise = ""
+          impStmt =
+            "import "
+              <> maybe "" (const "qualified ") mQual
+              <> modName
+              <> (if hiding then " hiding " else " ")
+              <> symImp
+              <> maybe "" (" as " <>) mQual
+      -- Re-labeling is needed to reflect annotations correctly
+      L _ idecl0 <- liftParseAST @(ImportDecl GhcPs) df impStmt
+      let idecl = L ran idecl0
+      addSimpleAnnT
+        idecl
+        (DP (1, indentation - 1))
+        [(G AnnImport, DP (1, indentation - 1))]
+      pure idecl
+
+newUnqualImport :: String -> String -> Bool -> ParsedSource -> Maybe Rewrite
+newUnqualImport modName symbol = newImport modName (Just symbol) Nothing
+
+newImportAll :: String -> ParsedSource -> Maybe Rewrite
+newImportAll modName = newImport modName Nothing Nothing False
+
+-- | Insert "import Prelude hiding (symbol)"
+hideImplicitPreludeSymbol :: String -> ParsedSource -> Maybe Rewrite
+hideImplicitPreludeSymbol symbol = newUnqualImport "Prelude" symbol True

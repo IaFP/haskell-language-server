@@ -8,12 +8,11 @@ module Development.IDE.Types.Shake
     ValueWithDiagnostics (..),
     Values,
     Key (..),
-    SomeShakeValue,
     BadDependency (..),
     ShakeValue(..),
     currentValue,
     isBadDependency,
-  toShakeValue,encodeShakeValue,decodeShakeValue,toKey,toNoFileKey)
+  toShakeValue,encodeShakeValue,decodeShakeValue)
 where
 
 import           Control.DeepSeq
@@ -25,13 +24,11 @@ import           Data.Hashable
 import           Data.Typeable
 import           Data.Vector                          (Vector)
 import           Development.IDE.Core.PositionMapping
-import           Development.IDE.Graph                (RuleResult,
-                                                       ShakeException (shakeExceptionInner))
-import qualified Development.IDE.Graph                as Shake
-import           Development.IDE.Graph.Classes
-import           Development.IDE.Graph.Database       (SomeShakeValue (..))
 import           Development.IDE.Types.Diagnostics
 import           Development.IDE.Types.Location
+import           Development.Shake                    (RuleResult,
+                                                       ShakeException (shakeExceptionInner))
+import           Development.Shake.Classes
 import           GHC.Generics
 import           Language.LSP.Types
 
@@ -57,7 +54,7 @@ data ValueWithDiagnostics
 type Values = HashMap (NormalizedFilePath, Key) ValueWithDiagnostics
 
 -- | Key type
-data Key = forall k . (Typeable k, Hashable k, Eq k, NFData k, Show k) => Key k
+data Key = forall k . (Typeable k, Hashable k, Eq k, Show k) => Key k
 
 instance Show Key where
   show (Key k) = show k
@@ -67,14 +64,7 @@ instance Eq Key where
                      | otherwise = False
 
 instance Hashable Key where
-    hashWithSalt salt (Key key) = hashWithSalt salt key
-
-instance Binary Key where
-    get = error "not really"
-    put _ = error "not really"
-
-instance NFData Key where
-    rnf (Key k) = rnf k
+    hashWithSalt salt (Key key) = hashWithSalt salt (typeOf key, key)
 
 -- | When we depend on something that reported an error, and we fail as a direct result, throw BadDependency
 --   which short-circuits the rest of the action
@@ -86,13 +76,6 @@ isBadDependency x
     | Just (x :: ShakeException) <- fromException x = isBadDependency $ shakeExceptionInner x
     | Just (_ :: BadDependency) <- fromException x = True
     | otherwise = False
-
-
-toKey :: Shake.ShakeValue k => k -> NormalizedFilePath -> SomeShakeValue
-toKey = (SomeShakeValue .) . curry Q
-
-toNoFileKey :: (Show k, Typeable k, Eq k, Hashable k, Binary k, NFData k) => k -> SomeShakeValue
-toNoFileKey k = toKey k emptyFilePath
 
 newtype Q k = Q (k, NormalizedFilePath)
     deriving newtype (Eq, Hashable, NFData)

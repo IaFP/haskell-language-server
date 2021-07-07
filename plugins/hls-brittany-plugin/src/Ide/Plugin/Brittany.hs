@@ -6,6 +6,7 @@ import           Control.Exception           (bracket_)
 import           Control.Lens
 import           Control.Monad.IO.Class
 import           Control.Monad.Trans.Maybe   (MaybeT, runMaybeT)
+import           Data.Coerce
 import           Data.Maybe                  (mapMaybe, maybeToList)
 import           Data.Semigroup
 import           Data.Text                   (Text)
@@ -80,7 +81,7 @@ runBrittany :: Int              -- ^ tab  size
 runBrittany tabSize df confPath text = do
   let cfg = mempty
               { _conf_layout =
-                  mempty { _lconfig_indentAmount = opt (Last tabSize)
+                  mempty { _lconfig_indentAmount = opt (coerce tabSize)
                          }
               , _conf_forward =
                   (mempty :: CForwardOptions Option)

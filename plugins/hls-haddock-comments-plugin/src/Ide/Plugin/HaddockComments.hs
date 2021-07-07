@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP                       #-}
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE FlexibleContexts          #-}
 {-# LANGUAGE NamedFieldPuns            #-}
@@ -91,11 +90,7 @@ genForSig = GenComments {..}
     isFresh Ann {annsDP} = null [() | (AnnComment _, _) <- annsDP]
     collectKeys = keyFromTyVar 0
 
-#if MIN_VERSION_ghc(9,0,0)
-    comment = mkComment "-- ^ " badRealSrcSpan
-#else
     comment = mkComment "-- ^ " noSrcSpan
-#endif
     dp = [(AnnComment comment, DP (0, 1)), (G AnnRarrow, DP (1, 2))]
 
 genForRecord :: GenComments
@@ -114,11 +109,7 @@ genForRecord = GenComments {..}
 
     collectKeys = keyFromCon
 
-#if MIN_VERSION_ghc(9,0,0)
-    comment = mkComment "-- | " badRealSrcSpan
-#else
     comment = mkComment "-- | " noSrcSpan
-#endif
 
 -----------------------------------------------------------------------------
 
@@ -134,13 +125,10 @@ toAction title uri edit = CodeAction {..}
     _edit = Just WorkspaceEdit {..}
     _isPreferred = Nothing
     _disabled = Nothing
-    _xdata = Nothing
-    _changeAnnotations = Nothing
-
 
 toRange :: SrcSpan -> Maybe Range
 toRange src
-  | (OldRealSrcSpan s) <- src,
+  | (RealSrcSpan s) <- src,
     range' <- realSrcSpanToRange s =
     Just range'
   | otherwise = Nothing
@@ -155,12 +143,7 @@ cleanPriorComments x = x {annPriorComments = []}
 -----------------------------------------------------------------------------
 
 keyFromTyVar :: Int -> LHsType GhcPs -> [AnnKey]
-#if MIN_VERSION_ghc(9,0,0)
--- GHC9 HsFunTy has 4 arguments, we could extract this
-keyFromTyVar dep c@(L _ (HsFunTy _ _ x y))
-#else
 keyFromTyVar dep c@(L _ (HsFunTy _ x y))
-#endif
   | dep < 1 = mkAnnKey c : keyFromTyVar dep x ++ keyFromTyVar dep y
   | otherwise = []
 keyFromTyVar dep (L _ t@HsForAllTy {}) = keyFromTyVar dep (hst_body t)

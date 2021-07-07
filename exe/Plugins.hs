@@ -11,6 +11,9 @@ import           Development.IDE.Plugin.HLS.GhcIde as GhcIde
 import           Ide.Plugin.Example                as Example
 import           Ide.Plugin.Example2               as Example2
 
+import           Ide.Plugin.TestPlugin             as TestPlugin   
+
+
 -- haskell-language-server optional plugins
 
 #if class
@@ -27,10 +30,6 @@ import           Ide.Plugin.Eval                   as Eval
 
 #if importLens
 import           Ide.Plugin.ExplicitImports        as ExplicitImports
-#endif
-
-#if refineImports
-import           Ide.Plugin.RefineImports          as RefineImports
 #endif
 
 #if retrie
@@ -78,7 +77,7 @@ import           Ide.Plugin.StylishHaskell         as StylishHaskell
 #if brittany
 import           Ide.Plugin.Brittany               as Brittany
 #endif
-
+          
 -- ---------------------------------------------------------------------
 
 -- | The plugins configured for use in this instance of the language
@@ -93,6 +92,8 @@ idePlugins includeExamples = pluginDescToIdePlugins allPlugins
                    then basePlugins ++ examplePlugins
                    else basePlugins
     basePlugins =
+      GhcIde.descriptors ++
+      TestPlugin.descriptor "test plugin" :
 #if pragmas
       Pragmas.descriptor  "pragmas" :
 #endif
@@ -103,7 +104,7 @@ idePlugins includeExamples = pluginDescToIdePlugins allPlugins
       Fourmolu.descriptor "fourmolu" :
 #endif
 #if tactic
-      Tactic.descriptor "tactics" :
+      Tactic.descriptor "tactic" :
 #endif
 #if ormolu
       Ormolu.descriptor   "ormolu" :
@@ -114,7 +115,7 @@ idePlugins includeExamples = pluginDescToIdePlugins allPlugins
 #if retrie
       Retrie.descriptor "retrie" :
 #endif
-#if brittany
+#if AGPL && brittany
       Brittany.descriptor "brittany" :
 #endif
 #if class
@@ -129,9 +130,6 @@ idePlugins includeExamples = pluginDescToIdePlugins allPlugins
 #if importLens
       ExplicitImports.descriptor "importLens" :
 #endif
-#if refineImports
-      RefineImports.descriptor "refineImports" :
-#endif
 #if moduleName
       ModuleName.descriptor "moduleName" :
 #endif
@@ -141,9 +139,7 @@ idePlugins includeExamples = pluginDescToIdePlugins allPlugins
 #if splice
       Splice.descriptor "splice" :
 #endif
-    -- The ghcide descriptors should come last so that the notification handlers
-    -- (which restart the Shake build) run after everything else
-      GhcIde.descriptors
+      []
     examplePlugins =
       [Example.descriptor  "eg"
       ,Example2.descriptor "eg2"

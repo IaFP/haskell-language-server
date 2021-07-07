@@ -18,18 +18,21 @@ import           Control.Exception             (evaluate, mask, throwIO)
 import           Control.Monad.Extra           (eitherM, join, mapMaybeM)
 import           Control.Monad.IO.Class
 import           Data.Either                   (fromRight)
-import           Data.Set                      (Set)
-import qualified Data.Set                      as Set
 import           Data.Unique
 import           Development.IDE.GHC.Compat
 import           Development.IDE.GHC.Error     (catchSrcErrors)
 import           Development.IDE.GHC.Util      (lookupPackageConfig)
-import           Development.IDE.Graph.Classes
 import           Development.IDE.Types.Exports (ExportsMap, createExportsMap)
-import           GhcPlugins                    (HscEnv (hsc_dflags))
+import           Development.Shake.Classes
+import           GhcPlugins                    (HscEnv (hsc_dflags),
+                                                InstalledPackageInfo (exposedModules),
+                                                Module (..),
+                                                PackageState (explicitPackages),
+                                                listVisibleModuleNames,
+                                                packageConfigId)
 import           LoadIface                     (loadInterface)
 import qualified Maybes
--- import           Module                        (InstalledUnitId)
+import           Module                        (InstalledUnitId)
 import           OpenTelemetry.Eventlog        (withSpan)
 import           System.Directory              (canonicalizePath)
 import           System.FilePath
@@ -45,7 +48,7 @@ data HscEnvEq = HscEnvEq
                -- ^ In memory components for this HscEnv
                -- This is only used at the moment for the import dirs in
                -- the DynFlags
-    , envImportPaths        :: Maybe (Set FilePath)
+    , envImportPaths        :: Maybe [String]
         -- ^ If Just, import dirs originally configured in this env
         --   If Nothing, the env import dirs are unaltered
     , envPackageExports     :: IO ExportsMap
@@ -66,9 +69,9 @@ newHscEnvEq cradlePath hscEnv0 deps = do
     importPathsCanon <-
       mapM canonicalizePath $ relativeToCradle <$> importPaths (hsc_dflags hscEnv0)
 
-    newHscEnvEqWithImportPaths (Just $ Set.fromList importPathsCanon) hscEnv deps
+    newHscEnvEqWithImportPaths (Just importPathsCanon) hscEnv deps
 
-newHscEnvEqWithImportPaths :: Maybe (Set FilePath) -> HscEnv -> [(InstalledUnitId, DynFlags)] -> IO HscEnvEq
+newHscEnvEqWithImportPaths :: Maybe [String] -> HscEnv -> [(InstalledUnitId, DynFlags)] -> IO HscEnvEq
 newHscEnvEqWithImportPaths envImportPaths hscEnv deps = do
 
     let dflags = hsc_dflags hscEnv
@@ -90,8 +93,8 @@ newHscEnvEqWithImportPaths envImportPaths hscEnv deps = do
             doOne (pkg, mn) = do
                 modIface <- liftIO $ initIfaceLoad hscEnv $ loadInterface
                     ""
-                    (mkModule (packageConfigId pkg) mn)
-                    (ImportByUser NotBoot)
+                    (Module (packageConfigId pkg) mn)
+                    (ImportByUser False)
                 return $ case modIface of
                     Maybes.Failed    _r -> Nothing
                     Maybes.Succeeded mi -> Just mi
@@ -104,7 +107,7 @@ newHscEnvEqWithImportPaths envImportPaths hscEnv deps = do
         <$> catchSrcErrors
           dflags
           "listVisibleModuleNames"
-          (evaluate . force . Just $ oldListVisibleModuleNames dflags)
+          (evaluate . force . Just $ listVisibleModuleNames dflags)
 
     return HscEnvEq{..}
 
@@ -118,7 +121,7 @@ newHscEnvEqPreserveImportPaths = newHscEnvEqWithImportPaths Nothing
 hscEnvWithImportPaths :: HscEnvEq -> HscEnv
 hscEnvWithImportPaths HscEnvEq{..}
     | Just imps <- envImportPaths
-    = hscEnv{hsc_dflags = (hsc_dflags hscEnv){importPaths = Set.toList imps}}
+    = hscEnv{hsc_dflags = (hsc_dflags hscEnv){importPaths = imps}}
     | otherwise
     = hscEnv
 
@@ -159,3 +162,4 @@ onceAsync act = do
             pure (OnceRunning x, unmask $ run x)
 
 data Once a = OncePending | OnceRunning (Async a)
+

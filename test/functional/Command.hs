@@ -2,13 +2,15 @@
 module Command (tests) where
 
 import           Control.Lens            hiding (List)
+import           Control.Monad.IO.Class
 import           Data.Char
 import qualified Data.Text               as T
+import           Language.LSP.Test
 import           Language.LSP.Types      as LSP
 import           Language.LSP.Types.Lens as LSP
-import           Test.Hls
-import           Test.Hls.Command
-import           Test.Hls.Flags          (requiresEvalPlugin)
+import           Test.Hls.Util
+import           Test.Tasty
+import           Test.Tasty.HUnit
 
 tests :: TestTree
 tests = testGroup "commands" [
@@ -20,7 +22,7 @@ tests = testGroup "commands" [
             liftIO $ do
                 all f cmds @? "All prefixed"
                 not (null cmds) @? "Commands aren't empty"
-    , requiresEvalPlugin $ testCase "get de-prefixed" $
+    , testCase "get de-prefixed" $
         runSession hlsCommand fullCaps "test/testdata/" $ do
             ResponseMessage _ _ (Left err) <- request
                 SWorkspaceExecuteCommand

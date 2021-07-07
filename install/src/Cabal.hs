@@ -72,17 +72,20 @@ cabalInstallHls versionNumber args = do
     ++ installMethod
     ++ args
 
-  let verExe = "haskell-language-server-" ++ versionNumber <.> exe
+  let minorVerExe = "haskell-language-server-" ++ versionNumber <.> exe
+      majorVerExe = "haskell-language-server-" ++ dropExtension versionNumber <.> exe
 
   let copyCmd old new = if os == "mingw32"
                         then liftIO $ copyFile old new
                         else command [] "ln" ["-f", old, new]
-  copyCmd (localBin </> "haskell-language-server" <.> exe) (localBin </> verExe)
+  copyCmd (localBin </> "haskell-language-server" <.> exe) (localBin </> minorVerExe)
+  copyCmd (localBin </> "haskell-language-server" <.> exe) (localBin </> majorVerExe)
 
   printLine $   "Copied executables "
              ++ ("haskell-language-server-wrapper" <.> exe) ++ ", "
              ++ ("haskell-language-server" <.> exe) ++ ", "
-             ++ verExe
+             ++ majorVerExe ++ " and "
+             ++ minorVerExe
              ++ " to " ++ localBin
 
 getProjectFile :: VersionNumber -> Action FilePath
@@ -105,7 +108,7 @@ checkCabal args = do
   return cabalVersion
 
 getCabalVersion :: [String] -> Action String
-getCabalVersion args = trimmedStdout <$> execCabal ("--numeric-version" : args)
+getCabalVersion args = trimmedStdout <$> (execCabal $ ["--numeric-version"] ++ args)
 
 -- | Error message when the `cabal` binary is an older version
 cabalInstallIsOldFailMsg :: String -> String

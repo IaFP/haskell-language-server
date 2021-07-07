@@ -1,6 +1,7 @@
 {-# LANGUAGE CPP          #-}
 {-# LANGUAGE RankNTypes   #-}
 {-# LANGUAGE TypeFamilies #-}
+#include "ghc-api-version.h"
 
 module Development.IDE.Plugin.Completions
     ( descriptor
@@ -9,8 +10,8 @@ module Development.IDE.Plugin.Completions
     ) where
 
 import           Control.Concurrent.Async                     (concurrently)
+import           Control.Monad
 import           Control.Monad.Extra
-import           Control.Monad.IO.Class
 import           Control.Monad.Trans.Maybe
 import           Data.Aeson
 import           Data.List                                    (find)
@@ -25,32 +26,27 @@ import           Development.IDE.GHC.Error                    (rangeToSrcSpan)
 import           Development.IDE.GHC.ExactPrint               (Annotated (annsA),
                                                                GetAnnotatedParsedSource (GetAnnotatedParsedSource))
 import           Development.IDE.GHC.Util                     (prettyPrint)
-import           Development.IDE.Graph
-import           Development.IDE.Graph.Classes
 import           Development.IDE.Plugin.CodeAction.ExactPrint
 import           Development.IDE.Plugin.Completions.Logic
 import           Development.IDE.Plugin.Completions.Types
 import           Development.IDE.Types.HscEnvEq               (hscEnv)
 import           Development.IDE.Types.Location
+import           Development.Shake
+import           Development.Shake.Classes
 import           GHC.Exts                                     (toList)
 import           GHC.Generics
-import           Ide.Plugin.Config                            (Config)
+import           Ide.Plugin.Config                            (Config (completionSnippetsOn))
 import           Ide.Types
 import qualified Language.LSP.Server                          as LSP
 import           Language.LSP.Types
 import qualified Language.LSP.VFS                             as VFS
-#if MIN_VERSION_ghc(9,0,0)
-import           GHC.Tc.Module                                (tcRnImportDecls)
-#else
 import           TcRnDriver                                   (tcRnImportDecls)
-#endif
 
 descriptor :: PluginId -> PluginDescriptor IdeState
 descriptor plId = (defaultPluginDescriptor plId)
   { pluginRules = produceCompletions
   , pluginHandlers = mkPluginHandler STextDocumentCompletion getCompletionsLSP
   , pluginCommands = [extendImportCommand]
-  , pluginConfigDescriptor = defaultConfigDescriptor {configCustomConfig = mkCustomConfig properties}
   }
 
 produceCompletions :: Rules ()
@@ -139,8 +135,9 @@ getCompletionsLSP ide plId
                 -> return (InL $ List [])
               (Just pfix', _) -> do
                 let clientCaps = clientCapabilities $ shakeExtras ide
-                config <- getCompletionsConfig plId
-                allCompletions <- liftIO $ getCompletions plId ideOpts cci' parsedMod bindMap pfix' clientCaps config
+                config <- getClientConfig $ shakeExtras ide
+                let snippets = WithSnippets . completionSnippetsOn $ config
+                allCompletions <- liftIO $ getCompletions plId ideOpts cci' parsedMod bindMap pfix' clientCaps snippets
                 pure $ InL (List allCompletions)
               _ -> return (InL $ List [])
           _ -> return (InL $ List [])

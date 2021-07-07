@@ -67,8 +67,12 @@ import           Lexer
 import           Module                         (moduleNameSlashes)
 import           OccName                        (parenSymOcc)
 import           Outputable                     (Depth (..), Outputable, SDoc,
-                                                 neverQualify, ppr,
+                                                 mkUserStyle, neverQualify, ppr,
+                                                 renderWithStyle,
                                                  showSDocUnsafe)
+import           PackageConfig                  (PackageConfig)
+import           Packages                       (getPackageConfigMap,
+                                                 lookupPackage')
 import           RdrName                        (nameRdrName, rdrNameOcc)
 import           SrcLoc                         (mkRealSrcLoc)
 import           StringBuffer
@@ -88,17 +92,15 @@ modifyDynFlags f = do
   modifySession $ \h ->
     h { hsc_dflags = newFlags, hsc_IC = (hsc_IC h) {ic_dflags = newFlags} }
 
--- | Given a 'Unit' try and find the associated 'PackageConfig' in the environment.
-lookupPackageConfig :: Unit -> HscEnv -> Maybe GHC.PackageConfig
-lookupPackageConfig unit env =
-    -- GHC.lookupPackage' False pkgConfigMap unit
-    GHC.lookupUnit' False pkgConfigMap prClsre unit
+-- | Given a 'UnitId' try and find the associated 'PackageConfig' in the environment.
+lookupPackageConfig :: UnitId -> HscEnv -> Maybe PackageConfig
+lookupPackageConfig unitId env =
+    lookupPackage' False pkgConfigMap unitId
     where
         pkgConfigMap =
             -- For some weird reason, the GHC API does not provide a way to get the PackageConfigMap
             -- from PackageState so we have to wrap it in DynFlags first.
             getPackageConfigMap $ hsc_dflags env
-        prClsre = preloadClosureUs $ hsc_dflags env
 
 
 -- | Convert from the @text@ package to the @GHC@ 'StringBuffer'.
@@ -125,7 +127,7 @@ prettyPrint :: Outputable a => a -> String
 prettyPrint = unsafePrintSDoc . ppr
 
 unsafePrintSDoc :: SDoc -> String
-unsafePrintSDoc sdoc = oldRenderWithStyle dflags sdoc (oldMkUserStyle dflags neverQualify AllTheWay)
+unsafePrintSDoc sdoc = renderWithStyle dflags sdoc (mkUserStyle dflags neverQualify AllTheWay)
   where
     dflags = unsafeGlobalDynFlags
 
@@ -258,17 +260,13 @@ dupHandleTo filepath h other_side
 
 -- | This is copied unmodified from GHC since it is not exposed.
 -- Note the beautiful inline comment!
-#if MIN_VERSION_ghc(9,0,0)
-dupHandle_ :: (RawIO dev, IODevice dev, BufferedIO dev, Typeable dev) => dev
-#else
 dupHandle_ :: (IODevice dev, BufferedIO dev, Typeable dev) => dev
-#endif
            -> FilePath
            -> Maybe (MVar Handle__)
            -> Handle__
            -> Maybe HandleFinalizer
            -> IO Handle
-dupHandle_ new_dev filepath other_side Handle__{..} mb_finalizer = do
+dupHandle_ new_dev filepath other_side _h_@Handle__{..} mb_finalizer = do
    -- XXX wrong!
   mb_codec <- if isJust haEncoder then fmap Just getLocaleEncoding else return Nothing
   mkHandle new_dev filepath haType True{-buffered-} mb_codec

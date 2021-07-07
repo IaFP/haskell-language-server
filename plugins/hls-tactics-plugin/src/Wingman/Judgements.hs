@@ -1,30 +1,28 @@
 module Wingman.Judgements where
 
-import           ConLike (ConLike)
 import           Control.Arrow
-import           Control.Lens hiding (Context)
+import           Control.Lens                        hiding (Context)
 import           Data.Bool
 import           Data.Char
 import           Data.Coerce
-import           Data.Generics.Product (field)
-import           Data.Map (Map)
-import qualified Data.Map as M
+import           Data.Generics.Product               (field)
+import           Data.Map                            (Map)
+import qualified Data.Map                            as M
 import           Data.Maybe
-import           Data.Set (Set)
-import qualified Data.Set as S
-import           Development.IDE.Core.UseStale (Tracked, unTrack)
+import           Data.Set                            (Set)
+import qualified Data.Set                            as S
+import           DataCon                             (DataCon)
 import           Development.IDE.Spans.LocalBindings
 import           OccName
 import           SrcLoc
 import           Type
-import           Wingman.GHC (algebraicTyCon, normalizeType)
 import           Wingman.Types
 
 
 ------------------------------------------------------------------------------
 -- | Given a 'SrcSpan' and a 'Bindings', create a hypothesis.
-hypothesisFromBindings :: Tracked age RealSrcSpan -> Tracked age Bindings -> Hypothesis CType
-hypothesisFromBindings (unTrack -> span) (unTrack -> bs) = buildHypothesis $ getLocalScope bs span
+hypothesisFromBindings :: RealSrcSpan -> Bindings -> Hypothesis CType
+hypothesisFromBindings span bs = buildHypothesis $ getLocalScope bs span
 
 
 ------------------------------------------------------------------------------
@@ -38,13 +36,6 @@ buildHypothesis
       | Just ty <- t
       , isAlpha . head . occNameString $ occ = Just $ HyInfo occ UserPrv $ CType ty
       | otherwise = Nothing
-
-
-------------------------------------------------------------------------------
--- | Build a trivial hypothesis containing only a single name. The corresponding
--- HyInfo has no provenance or type.
-hySingleton :: OccName -> Hypothesis ()
-hySingleton n = Hypothesis . pure $ HyInfo n UserPrv ()
 
 
 blacklistingDestruct :: Judgement -> Judgement
@@ -69,19 +60,8 @@ withNewGoal :: a -> Judgement' a -> Judgement' a
 withNewGoal t = field @"_jGoal" .~ t
 
 
-normalizeHypothesis :: Functor f => Context -> f CType -> f CType
-normalizeHypothesis = fmap . coerce . normalizeType
-
-normalizeJudgement :: Functor f => Context -> f CType -> f CType
-normalizeJudgement = normalizeHypothesis
-
-
-introduce :: Context -> Hypothesis CType -> Judgement' CType -> Judgement' CType
--- NOTE(sandy): It's important that we put the new hypothesis terms first,
--- since 'jAcceptableDestructTargets' will never destruct a pattern that occurs
--- after a previously-destructed term.
-introduce ctx hy =
-  field @"_jHypothesis" %~ mappend (normalizeHypothesis ctx hy)
+introduce :: Hypothesis a -> Judgement' a -> Judgement' a
+introduce hy = field @"_jHypothesis" <>~ hy
 
 
 ------------------------------------------------------------------------------
@@ -116,12 +96,6 @@ recursiveHypothesis = introduceHypothesis $ const $ const RecursivePrv
 
 
 ------------------------------------------------------------------------------
--- | Introduce a binding in a recursive context.
-userHypothesis :: [(OccName, a)] -> Hypothesis a
-userHypothesis = introduceHypothesis $ const $ const UserPrv
-
-
-------------------------------------------------------------------------------
 -- | Check whether any of the given occnames are an ancestor of the term.
 hasPositionalAncestry
     :: Foldable t
@@ -152,7 +126,7 @@ filterAncestry
     -> Judgement
     -> Judgement
 filterAncestry ancestry reason jdg =
-    disallowing reason (M.keysSet $ M.filterWithKey go $ hyByName $ jHypothesis jdg) jdg
+    disallowing reason (M.keys $ M.filterWithKey go $ hyByName $ jHypothesis jdg) jdg
   where
     go name _
       = not
@@ -175,10 +149,7 @@ findPositionVal :: Judgement' a -> OccName -> Int -> Maybe OccName
 findPositionVal jdg defn pos = listToMaybe $ do
   -- It's important to inspect the entire hypothesis here, as we need to trace
   -- ancstry through potentially disallowed terms in the hypothesis.
-  (name, hi) <- M.toList
-              $ M.map (overProvenance expandDisallowed)
-              $ hyByName
-              $ jEntireHypothesis jdg
+  (name, hi) <- M.toList $ M.map (overProvenance expandDisallowed) $ hyByName $ jEntireHypothesis jdg
   case hi_provenance hi of
     TopLevelArgPrv defn' pos' _
       | defn == defn'
@@ -192,7 +163,7 @@ findPositionVal jdg defn pos = listToMaybe $ do
 ------------------------------------------------------------------------------
 -- | Helper function for determining the ancestry list for
 -- 'filterSameTypeFromOtherPositions'.
-findDconPositionVals :: Judgement' a -> ConLike -> Int -> [OccName]
+findDconPositionVals :: Judgement' a -> DataCon -> Int -> [OccName]
 findDconPositionVals jdg dcon pos = do
   (name, hi) <- M.toList $ hyByName $ jHypothesis jdg
   case hi_provenance hi of
@@ -207,7 +178,7 @@ findDconPositionVals jdg dcon pos = do
 -- given position for the datacon. Used to ensure recursive functions like
 -- 'fmap' preserve the relative ordering of their arguments by eliminating any
 -- other term which might match.
-filterSameTypeFromOtherPositions :: ConLike -> Int -> Judgement -> Judgement
+filterSameTypeFromOtherPositions :: DataCon -> Int -> Judgement -> Judgement
 filterSameTypeFromOtherPositions dcon pos jdg =
   let hy = hyByName
          . jHypothesis
@@ -219,7 +190,7 @@ filterSameTypeFromOtherPositions dcon pos jdg =
       to_remove =
         M.filter (flip S.member tys . hi_type) (hyByName $ jHypothesis jdg)
           M.\\ hy
-   in disallowing Shadowed (M.keysSet to_remove) jdg
+   in disallowing Shadowed (M.keys to_remove) jdg
 
 
 ------------------------------------------------------------------------------
@@ -243,7 +214,6 @@ provAncestryOf (PatternMatchPrv (PatVal mo so _ _)) =
 provAncestryOf (ClassMethodPrv _) = mempty
 provAncestryOf UserPrv = mempty
 provAncestryOf RecursivePrv = mempty
-provAncestryOf ImportPrv = mempty
 provAncestryOf (DisallowedPrv _ p2) = provAncestryOf p2
 
 
@@ -260,7 +230,7 @@ extremelyStupid__definingFunction =
 
 patternHypothesis
     :: Maybe OccName
-    -> ConLike
+    -> DataCon
     -> Judgement' a
     -> [(OccName, a)]
     -> Hypothesis a
@@ -268,20 +238,19 @@ patternHypothesis scrutinee dc jdg
   = introduceHypothesis $ \_ pos ->
       PatternMatchPrv $
         PatVal
-          scrutinee
-          (maybe
-              mempty
-              (\scrut -> S.singleton scrut <> getAncestry jdg scrut)
-              scrutinee)
-          (Uniquely dc)
-          pos
+            scrutinee
+            (maybe mempty
+                  (\scrut -> S.singleton scrut <> getAncestry jdg scrut)
+                  scrutinee)
+            (Uniquely dc)
+            pos
 
 
 ------------------------------------------------------------------------------
 -- | Prevent some occnames from being used in the hypothesis. This will hide
 -- them from 'jHypothesis', but not from 'jEntireHypothesis'.
-disallowing :: DisallowReason -> S.Set OccName -> Judgement' a -> Judgement' a
-disallowing reason ns =
+disallowing :: DisallowReason -> [OccName] -> Judgement' a -> Judgement' a
+disallowing reason (S.fromList -> ns) =
   field @"_jHypothesis" %~ (\z -> Hypothesis . flip fmap (unHypothesis z) $ \hi ->
     case S.member (hi_name hi) ns of
       True  -> overProvenance (DisallowedPrv reason) hi
@@ -314,27 +283,6 @@ jLocalHypothesis
   . filter (isLocalHypothesis . hi_provenance)
   . unHypothesis
   . jHypothesis
-
-
-------------------------------------------------------------------------------
--- | Filter elements from the hypothesis
-hyFilter :: (HyInfo a -> Bool) -> Hypothesis a -> Hypothesis a
-hyFilter f  = Hypothesis . filter f . unHypothesis
-
-
-------------------------------------------------------------------------------
--- | Given a judgment, return the hypotheses that are acceptable to destruct.
---
--- We use the ordering of the hypothesis for this purpose. Since new bindings
--- are always inserted at the beginning, we can impose a canonical ordering on
--- which order to try destructs by what order they are introduced --- stopping
--- at the first one we've already destructed.
-jAcceptableDestructTargets :: Judgement' CType -> [HyInfo CType]
-jAcceptableDestructTargets
-  = filter (isJust . algebraicTyCon . unCType . hi_type)
-  . takeWhile (not . isAlreadyDestructed . hi_provenance)
-  . unHypothesis
-  . jEntireHypothesis
 
 
 ------------------------------------------------------------------------------
@@ -401,20 +349,17 @@ substJdg subst = fmap $ coerce . substTy subst . coerce
 
 
 mkFirstJudgement
-    :: Context
-    -> Hypothesis CType
+    :: Hypothesis CType
     -> Bool  -- ^ are we in the top level rhs hole?
     -> Type
     -> Judgement' CType
-mkFirstJudgement ctx hy top goal =
-  normalizeJudgement ctx $
-    Judgement
-      { _jHypothesis        = hy
-      , _jBlacklistDestruct = False
-      , _jWhitelistSplit    = True
-      , _jIsTopHole         = top
-      , _jGoal              = CType goal
-      }
+mkFirstJudgement hy top goal = Judgement
+  { _jHypothesis        = hy
+  , _jBlacklistDestruct = False
+  , _jWhitelistSplit    = True
+  , _jIsTopHole         = top
+  , _jGoal              = CType goal
+  }
 
 
 ------------------------------------------------------------------------------
@@ -422,6 +367,13 @@ mkFirstJudgement ctx hy top goal =
 isTopLevel :: Provenance -> Bool
 isTopLevel TopLevelArgPrv{} = True
 isTopLevel _                = False
+
+
+------------------------------------------------------------------------------
+-- | Was this term defined by the user?
+isUserProv :: Provenance -> Bool
+isUserProv UserPrv{} = True
+isUserProv _         = False
 
 
 ------------------------------------------------------------------------------
@@ -445,12 +397,6 @@ isPatternMatch _                 = False
 isDisallowed :: Provenance -> Bool
 isDisallowed DisallowedPrv{} = True
 isDisallowed _               = False
-
-------------------------------------------------------------------------------
--- | Has this term already been disallowed?
-isAlreadyDestructed :: Provenance -> Bool
-isAlreadyDestructed (DisallowedPrv AlreadyDestructed _) = True
-isAlreadyDestructed _ = False
 
 
 ------------------------------------------------------------------------------

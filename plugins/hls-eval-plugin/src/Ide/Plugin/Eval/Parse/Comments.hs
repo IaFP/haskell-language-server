@@ -46,6 +46,7 @@ import           Text.Megaparsec.Char                     (alphaNumChar, char,
                                                            eol, hspace,
                                                            letterChar)
 
+
 {-
 We build parsers combining the following three kinds of them:
 
@@ -322,7 +323,7 @@ resultBlockP :: BlockCommentParser [String]
 resultBlockP = do
     BlockEnv {..} <- ask
     many $
-        fmap fst $ nonEmptyNormalLineP isLhs $
+        fmap fst . nonEmptyNormalLineP isLhs $
             Block blockRange
 
 positionToSourcePos :: Position -> SourcePos

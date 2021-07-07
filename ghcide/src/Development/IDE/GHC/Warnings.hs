@@ -11,8 +11,6 @@ import           GhcPlugins                        as GHC hiding (Var, (<>))
 import           Control.Concurrent.Strict
 import qualified Data.Text                         as T
 
-import           Development.IDE.GHC.Compat        (LogActionCompat,
-                                                    logActionCompat)
 import           Development.IDE.GHC.Error
 import           Development.IDE.Types.Diagnostics
 import           Language.LSP.Types                (type (|?) (..))
@@ -30,11 +28,11 @@ import           Language.LSP.Types                (type (|?) (..))
 withWarnings :: T.Text -> ((ModSummary -> ModSummary) -> IO a) -> IO ([(WarnReason, FileDiagnostic)], a)
 withWarnings diagSource action = do
   warnings <- newVar []
-  let newAction :: LogActionCompat
-      newAction dynFlags wr _ loc prUnqual msg = do
-        let wr_d = map ((wr,) . third3 (attachReason wr)) $ diagFromErrMsg diagSource dynFlags $ mkWarnMsg dynFlags loc prUnqual msg
+  let newAction :: DynFlags -> WarnReason -> Severity -> SrcSpan -> PprStyle -> SDoc -> IO ()
+      newAction dynFlags wr _ loc style msg = do
+        let wr_d = map ((wr,) . third3 (attachReason wr)) $ diagFromErrMsg diagSource dynFlags $ mkWarnMsg dynFlags loc (queryQual style) msg
         modifyVar_ warnings $ return . (wr_d:)
-  res <- action $ \x -> x{ms_hspp_opts = (ms_hspp_opts x){log_action = logActionCompat newAction}}
+  res <- action $ \x -> x{ms_hspp_opts = (ms_hspp_opts x){log_action = newAction}}
   warns <- readVar warnings
   return (reverse $ concat warns, res)
 

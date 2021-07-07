@@ -2,13 +2,19 @@
 
 module Diagnostic (tests) where
 
-import           Control.Lens            hiding (List)
-import           Data.Aeson              (toJSON)
+import           Control.Applicative.Combinators
+import           Control.Lens                    hiding (List)
+import           Control.Monad.IO.Class
+import           Data.Aeson                      (toJSON)
 import qualified Data.Default
 import           Ide.Plugin.Config
-import qualified Language.LSP.Types.Lens as LSP
-import           Test.Hls
-import           Test.Hls.Command
+import           Language.LSP.Test               hiding (message)
+import           Language.LSP.Types
+import qualified Language.LSP.Types.Lens         as LSP
+import           Test.Hls.Util
+import           Test.Tasty
+import           Test.Tasty.ExpectedFailure      (ignoreTestBecause)
+import           Test.Tasty.HUnit
 
 -- ---------------------------------------------------------------------
 

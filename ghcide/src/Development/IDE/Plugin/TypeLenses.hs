@@ -1,6 +1,5 @@
-{-# LANGUAGE DeriveAnyClass   #-}
-{-# LANGUAGE OverloadedLabels #-}
-{-# LANGUAGE TypeFamilies     #-}
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE TypeFamilies   #-}
 
 -- | An HLS plugin to provide code lenses for type signatures
 module Development.IDE.Plugin.TypeLenses (
@@ -14,14 +13,16 @@ module Development.IDE.Plugin.TypeLenses (
 
 import           Avail                               (availsToNameSet)
 import           Control.DeepSeq                     (rwhnf)
-import           Control.Monad                       (mzero)
+import           Control.Monad                       (join)
 import           Control.Monad.Extra                 (whenMaybe)
 import           Control.Monad.IO.Class              (MonadIO (liftIO))
+import qualified Data.Aeson                          as A
 import           Data.Aeson.Types                    (Value (..), toJSON)
 import qualified Data.Aeson.Types                    as A
 import qualified Data.HashMap.Strict                 as Map
 import           Data.List                           (find)
-import           Data.Maybe                          (catMaybes, fromJust)
+import           Data.Maybe                          (catMaybes, fromJust,
+                                                      fromMaybe)
 import qualified Data.Text                           as T
 import           Development.IDE                     (GhcSession (..),
                                                       HscEnvEq (hscEnv),
@@ -35,13 +36,13 @@ import           Development.IDE.Core.Service        (getDiagnostics)
 import           Development.IDE.Core.Shake          (getHiddenDiagnostics, use)
 import           Development.IDE.GHC.Compat
 import           Development.IDE.GHC.Util            (printName)
-import           Development.IDE.Graph.Classes
 import           Development.IDE.Spans.Common        (safeTyThingType)
 import           Development.IDE.Spans.LocalBindings (Bindings, getFuzzyScope)
 import           Development.IDE.Types.Location      (Position (Position, _character, _line),
                                                       Range (Range, _end, _start),
                                                       toNormalizedFilePath',
                                                       uriToFilePath')
+import           Development.Shake.Classes
 import           GHC.Generics                        (Generic)
 import           GhcPlugins                          (GlobalRdrEnv,
                                                       HscEnv (hsc_dflags), SDoc,
@@ -51,19 +52,16 @@ import           GhcPlugins                          (GlobalRdrEnv,
                                                       realSrcLocSpan,
                                                       tidyOpenType)
 import           HscTypes                            (mkPrintUnqualified)
-import           Ide.Plugin.Config                   (Config)
-import           Ide.Plugin.Properties
-import           Ide.PluginUtils                     (mkLspCommand,
-                                                      usePropertyLsp)
+import           Ide.Plugin.Config                   (Config,
+                                                      PluginConfig (plcConfig))
+import           Ide.PluginUtils                     (getPluginConfig,
+                                                      mkLspCommand)
 import           Ide.Types                           (CommandFunction,
                                                       CommandId (CommandId),
                                                       PluginCommand (PluginCommand),
                                                       PluginDescriptor (..),
                                                       PluginId,
-                                                      configCustomConfig,
-                                                      defaultConfigDescriptor,
                                                       defaultPluginDescriptor,
-                                                      mkCustomConfig,
                                                       mkPluginHandler)
 import qualified Language.LSP.Server                 as LSP
 import           Language.LSP.Types                  (ApplyWorkspaceEditParams (ApplyWorkspaceEditParams),
@@ -80,6 +78,7 @@ import           PatSyn                              (patSynName)
 import           TcEnv                               (tcInitTidyEnv)
 import           TcRnMonad                           (initTcWithGbl)
 import           TcRnTypes                           (TcGblEnv (..))
+import           TcType                              (pprSigmaType)
 import           Text.Regex.TDFA                     ((=~), (=~~))
 
 typeLensCommandId :: T.Text
@@ -91,16 +90,7 @@ descriptor plId =
     { pluginHandlers = mkPluginHandler STextDocumentCodeLens codeLensProvider
     , pluginCommands = [PluginCommand (CommandId typeLensCommandId) "adds a signature" commandHandler]
     , pluginRules = rules
-    , pluginConfigDescriptor = defaultConfigDescriptor {configCustomConfig = mkCustomConfig properties}
     }
-
-properties :: Properties '[ 'PropertyKey "mode" ('TEnum Mode)]
-properties = emptyProperties
-  & defineEnumProperty #mode "Control how type lenses are shown"
-    [ (Always, "Always displays type lenses of global bindings")
-    , (Exported, "Only display type lenses of exported global bindings")
-    , (Diagnostics, "Follows error messages produced by GHC about missing signatures")
-    ] Always
 
 codeLensProvider ::
   IdeState ->
@@ -108,7 +98,7 @@ codeLensProvider ::
   CodeLensParams ->
   LSP.LspM Config (Either ResponseError (List CodeLens))
 codeLensProvider ideState pId CodeLensParams{_textDocument = TextDocumentIdentifier uri} = do
-  mode <- usePropertyLsp #mode pId properties
+  (fromMaybe Always . join -> mode) <- fmap (parseCustomConfig . plcConfig) <$> getPluginConfig pId
   fmap (Right . List) $ case uriToFilePath' uri of
     Just (toNormalizedFilePath' -> filePath) -> liftIO $ do
       tmr <- runAction "codeLens.TypeCheck" ideState (use TypeCheck filePath)
@@ -118,7 +108,7 @@ codeLensProvider ideState pId CodeLensParams{_textDocument = TextDocumentIdentif
       diag <- getDiagnostics ideState
       hDiag <- getHiddenDiagnostics ideState
 
-      let toWorkSpaceEdit tedit = WorkspaceEdit (Just $ Map.singleton uri $ List tedit) Nothing Nothing
+      let toWorkSpaceEdit tedit = WorkspaceEdit (Just $ Map.singleton uri $ List tedit) Nothing
           generateLensForGlobal sig@GlobalBindingTypeSig{..} = do
             range <- srcSpanToRange $ gbSrcSpan sig
             tedit <- gblBindingTypeSigToEdit sig
@@ -212,17 +202,13 @@ data Mode
     Diagnostics
   deriving (Eq, Ord, Show, Read, Enum)
 
-instance A.ToJSON Mode where
-  toJSON Always      = "always"
-  toJSON Exported    = "exported"
-  toJSON Diagnostics = "diagnostics"
-
 instance A.FromJSON Mode where
-  parseJSON = A.withText "Mode" $ \case
-    "always"      -> pure Always
-    "exported"    -> pure Exported
-    "diagnostics" -> pure Diagnostics
-    _             -> mzero
+  parseJSON = A.withText "Mode" $ \s ->
+    case T.toLower s of
+      "always"      -> pure Always
+      "exported"    -> pure Exported
+      "diagnostics" -> pure Diagnostics
+      _             -> A.unexpected (A.String s)
 
 --------------------------------------------------------------------------------
 
@@ -259,6 +245,9 @@ rules = do
     hsc <- use GhcSession nfp
     result <- liftIO $ gblBindingType (hscEnv <$> hsc) (tmrTypechecked <$> tmr)
     pure ([], result)
+
+parseCustomConfig :: A.Object -> Maybe Mode
+parseCustomConfig = A.parseMaybe (A..: "mode")
 
 gblBindingType :: Maybe HscEnv -> Maybe TcGblEnv -> IO (Maybe GlobalBindingTypeSigsResult)
 gblBindingType (Just hsc) (Just gblEnv) = do

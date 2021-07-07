@@ -1,5 +1,5 @@
 -- This works fine: {-# LANGUAGE TupleSections #-}
-module TLanguageOptionsTupleSections where
+module TLanguageOptionsTupleSection where
 
 -- Why oh why is this not working?
 -- What is special about TupleSections?

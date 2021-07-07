@@ -1,7 +1,7 @@
-cabal-version:      2.4
+cabal-version:      2.2
 category:           Development
 name:               haskell-language-server
-version:            1.2.0.0
+version:            1.0.0.0
 synopsis:           LSP server for GHC
 description:
   Please see the README on GitHub at <https://github.com/haskell/haskell-language-server#readme>
@@ -14,17 +14,11 @@ copyright:          The Haskell IDE Team
 license:            Apache-2.0
 license-file:       LICENSE
 build-type:         Simple
-tested-with:        GHC == 8.6.4 || == 8.6.5 || == 8.8.2 || == 8.8.3 || == 8.8.4 || == 8.10.2 || == 8.10.3 || == 8.10.4 || == 8.10.5
+tested-with:        GHC == 8.6.4 || == 8.6.5 || == 8.8.2 || == 8.8.3 || == 8.8.4 || == 8.10.2 || == 8.10.3 || == 8.10.4
 extra-source-files:
   README.md
   ChangeLog.md
-  test/testdata/**/*.project
-  test/testdata/**/*.cabal
-  test/testdata/**/*.yaml
-  -- this one is not matched by the previous glob
-  test/testdata/hlint/ignore/.hlint.yaml
-  test/testdata/**/*.h
-  test/testdata/**/*.hs
+  include/ghc-api-version.h
 
 flag pedantic
   description: Enable -Werror
@@ -61,21 +55,21 @@ library
     , cryptohash-sha1
     , data-default
     , ghc
-    , ghcide                ^>=1.4
+    , ghcide                ^>= 1.1.0.0
     , gitrev
     , lsp
     , hie-bios
     , hiedb
-    , hls-plugin-api        ^>= 1.1
+    , hls-plugin-api        ^>= 1.0.0.0
     , hslogger
     , optparse-applicative
     , optparse-simple
     , process
-    , hls-graph
+    , shake
     , safe-exceptions
     , sqlite-simple
     , unordered-containers
-    , aeson-pretty
+    , haskell-lsp-types
 
   ghc-options:      -Wall -Wredundant-constraints -Wno-name-shadowing -Wno-unticked-promoted-constructors
 
@@ -118,11 +112,6 @@ flag eval
 
 flag importLens
   description: Enable importLens plugin
-  default:     True
-  manual:      True
-
-flag refineImports
-  description: Enable refineImports plugin
   default:     True
   manual:      True
 
@@ -188,87 +177,96 @@ common example-plugins
   other-modules: Ide.Plugin.Example,
                  Ide.Plugin.Example2
 
+common test-plugin
+  hs-source-dirs: plugins/default/src
+  other-modules: Ide.Plugin.TestPlugin
+
 common class
   if flag(class) || flag(all-plugins)
-    build-depends: hls-class-plugin ^>= 1.0.0.1
+    build-depends: hls-class-plugin ^>= 1.0.0.0
     cpp-options: -Dclass
 
 common haddockComments
   if flag(haddockComments) || flag(all-plugins)
-    build-depends: hls-haddock-comments-plugin ^>= 1.0.0.1
+    build-depends: hls-haddock-comments-plugin ^>= 1.0.0.0
     cpp-options: -DhaddockComments
 
 common eval
   if flag(eval) || flag(all-plugins)
-    build-depends: hls-eval-plugin ^>= 1.1.0.0
+    build-depends: hls-eval-plugin ^>= 1.0.0.0
     cpp-options: -Deval
 
 common importLens
   if flag(importLens) || flag(all-plugins)
-    build-depends: hls-explicit-imports-plugin ^>= 1.0.0.1
+    build-depends: hls-explicit-imports-plugin ^>= 1.0.0.0
     cpp-options: -DimportLens
-
-common refineImports
-  if flag(refineImports) || flag(all-plugins)
-    build-depends: hls-refine-imports-plugin
-    cpp-options: -DrefineImports
 
 common retrie
   if flag(retrie) || flag(all-plugins)
-    build-depends: hls-retrie-plugin ^>= 1.0.0.1
+    build-depends: hls-retrie-plugin ^>= 1.0.0.0
     cpp-options: -Dretrie
 
 common tactic
   if flag(tactic) || flag(all-plugins)
-    build-depends: hls-tactics-plugin ^>= 1.2.0.0
+    build-depends: hls-tactics-plugin ^>= 1.0.0.0
     cpp-options: -Dtactic
 
 common hlint
   if flag(hlint) || flag(all-plugins)
-    build-depends: hls-hlint-plugin ^>= 1.0.0.2
+    build-depends: hls-hlint-plugin ^>= 1.0.0.0
     cpp-options: -Dhlint
 
 common moduleName
   if flag(moduleName) || flag(all-plugins)
-    build-depends: hls-module-name-plugin ^>= 1.0.0.0
+    hs-source-dirs: plugins/default/src
+    other-modules: Ide.Plugin.ModuleName
     cpp-options: -DmoduleName
 
 common pragmas
   if flag(pragmas) || flag(all-plugins)
-    build-depends: hls-pragmas-plugin ^>= 1.0.0.0
+    hs-source-dirs: plugins/default/src
+    build-depends: fuzzy
+    other-modules: Ide.Plugin.Pragmas
     cpp-options: -Dpragmas
 
 common splice
   if flag(splice) || flag(all-plugins)
-    build-depends: hls-splice-plugin ^>= 1.0.0.1
+    build-depends: hls-splice-plugin ^>= 1.0.0.0
     cpp-options: -Dsplice
 
 -- formatters
 
 common floskell
   if flag(floskell) || flag(all-formatters)
-    build-depends: hls-floskell-plugin      ^>=1.0.0.0
+    hs-source-dirs: plugins/default/src
+    other-modules: Ide.Plugin.Floskell
+    build-depends: floskell                 ^>=0.10
     cpp-options: -Dfloskell
 
 common fourmolu
   if flag(fourmolu) || flag(all-formatters)
-    build-depends: hls-fourmolu-plugin ^>= 1.0.0.0
+    hs-source-dirs: plugins/default/src
+    other-modules: Ide.Plugin.Fourmolu
+    build-depends: fourmolu                 ^>=0.3
     cpp-options: -Dfourmolu
 
 common ormolu
   if flag(ormolu) || flag(all-formatters)
-    build-depends: hls-ormolu-plugin ^>= 1.0.0.0
+    hs-source-dirs: plugins/default/src
+    other-modules: Ide.Plugin.Ormolu
+    build-depends: ormolu                   ^>=0.1.2
     cpp-options: -Dormolu
 
 common stylishHaskell
   if flag(stylishHaskell) || flag(all-formatters)
-    build-depends: hls-stylish-haskell-plugin ^>= 1.0.0.0
+    hs-source-dirs: plugins/default/src
+    other-modules: Ide.Plugin.StylishHaskell
+    build-depends: stylish-haskell          ^>=0.12
     cpp-options: -DstylishHaskell
 
 common brittany
   if (flag(brittany) || flag(all-formatters))
-    build-depends: hls-brittany-plugin ^>= 1.0.0.1
-    cpp-options: -Dbrittany
+    build-depends: hls-brittany-plugin ^>= 1.0.0.0
 
 executable haskell-language-server
   import:             common-deps
@@ -278,7 +276,6 @@ executable haskell-language-server
                     , haddockComments
                     , eval
                     , importLens
-                    , refineImports
                     , retrie
                     , tactic
                     , hlint
@@ -290,6 +287,7 @@ executable haskell-language-server
                     , ormolu
                     , stylishHaskell
                     , brittany
+                    , test-plugin
 
   main-is:          Main.hs
   hs-source-dirs:   exe
@@ -316,7 +314,6 @@ executable haskell-language-server
     , cryptohash-sha1
     , deepseq
     , ghc
-    , ghc-api-compat
     , ghc-boot-th
     , ghcide
     , hashable
@@ -333,12 +330,14 @@ executable haskell-language-server
     , mtl
     , regex-tdfa
     , safe-exceptions
-    , hls-graph
+    , shake                    >=0.17.5
     , sqlite-simple
     , temporary
     , transformers
     , unordered-containers
+    , with-utf8
 
+  include-dirs:     include
   default-language: Haskell2010
   default-extensions: DataKinds, TypeOperators
 
@@ -372,9 +371,43 @@ executable haskell-language-server-wrapper
 
   default-language: Haskell2010
 
+-- This common stanza simulates a previous private lib
+-- We removed it due to issues with stack when loading the project using a stack based hie.yaml
+-- See https://github.com/haskell/haskell-language-server/issues/114
+common hls-test-utils
+  import:           common-deps
+  hs-source-dirs:   test/utils
+  other-modules:    Test.Hls.Util
+  build-depends:
+    , aeson
+    , blaze-markup
+    , containers
+    , data-default
+    , lsp
+    , hie-bios
+    , hls-plugin-api        ^>= 1.0.0.0
+    , hslogger
+    , hspec
+    , hspec-core
+    , lens
+    , lsp-test              == 0.13.0.0
+    , stm
+    , tasty-expected-failure
+    , tasty-hunit
+    , temporary
+    , transformers
+    , unordered-containers
+    , yaml
+
+  ghc-options:      -Wall -Wredundant-constraints
+
+  if flag(pedantic)
+    ghc-options: -Werror
+
+  default-language: Haskell2010
 
 test-suite func-test
-  import:             common-deps
+  import:             common-deps, hls-test-utils
   type:               exitcode-stdio-1.0
   default-language:   Haskell2010
   build-tool-depends:
@@ -386,38 +419,42 @@ test-suite func-test
     , data-default
     , hspec-expectations
     , lens
+    , tasty
+    , tasty-ant-xml           >=1.1.6
+    , tasty-golden
+    , tasty-rerun
+    , megaparsec
+    , deepseq
     , ghcide
-    , hls-test-utils ^>= 1.0.0.0
-    , lsp-types
-    , aeson
-    , hls-plugin-api
-    , lsp-test
-    , containers
-    , unordered-containers
 
-  hs-source-dirs:     test/functional test/utils
+  hs-source-dirs:     test/functional plugins/hls-eval-plugin/test plugins/hls-splice-plugin/src plugins/hls-eval-plugin/src
 
   main-is:            Main.hs
   other-modules:
+    Class
     Command
     Completion
     Config
     Deferred
     Definition
     Diagnostic
+    Eval
     Format
     FunctionalBadProject
     FunctionalCodeAction
     FunctionalLiquid
     HieBios
     Highlight
+    ModuleName
     Progress
     Reference
     Rename
     Symbol
     TypeDefinition
-    Test.Hls.Command
-    Test.Hls.Flags
+    Splice
+    HaddockComments
+    Ide.Plugin.Splice.Types
+    Ide.Plugin.Eval.Types
 
   default-extensions: OverloadedStrings
   ghc-options:
@@ -426,52 +463,20 @@ test-suite func-test
   if flag(pedantic)
     ghc-options: -Werror -Wredundant-constraints
 
-  if flag(class) || flag(all-plugins)
-    cpp-options: -Dclass
-  if flag(haddockComments) || flag(all-plugins)
-    cpp-options: -DhaddockComments
-  if flag(eval) || flag(all-plugins)
-    cpp-options: -Deval
-  if flag(importLens) || flag(all-plugins)
-    cpp-options: -DimportLens
-  if flag(retrie) || flag(all-plugins)
-    cpp-options: -Dretrie
-  if flag(tactic) || flag(all-plugins)
-    cpp-options: -Dtactic
-  if flag(hlint) || flag(all-plugins)
-    cpp-options: -Dhlint
-  if flag(moduleName) || flag(all-plugins)
-    cpp-options: -DmoduleName
-  if flag(pragmas) || flag(all-plugins)
-    cpp-options: -Dpragmas
-  if flag(splice) || flag(all-plugins)
-    cpp-options: -Dsplice
-
--- formatters
-  if flag(floskell) || flag(all-formatters)
-    cpp-options: -Dfloskell
-  if flag(fourmolu) || flag(all-formatters)
-    cpp-options: -Dfourmolu
-  if flag(ormolu) || flag(all-formatters)
-    cpp-options: -Dormolu
-  if flag(stylishHaskell) || flag(all-formatters)
-    cpp-options: -DstylishHaskell
-  if (flag(brittany) || flag(all-formatters))
-    cpp-options: -Dbrittany
-
 test-suite wrapper-test
+  import:             hls-test-utils
   type:               exitcode-stdio-1.0
   build-tool-depends:
-    haskell-language-server:haskell-language-server-wrapper -any,
-    haskell-language-server:haskell-language-server -any
+    haskell-language-server:haskell-language-server-wrapper -any
 
   default-language:   Haskell2010
   build-depends:
     , base
     , directory
     , process
-    , hls-test-utils
-    , extra
+    , tasty
+    , tasty-ant-xml  >=1.1.6
+    , tasty-rerun
 
   hs-source-dirs:     test/wrapper
   main-is:            Main.hs

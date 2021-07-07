@@ -3,6 +3,7 @@
 -- SPDX-License-Identifier: Apache-2.0
 
 {-# LANGUAGE CPP        #-}
+#include "ghc-api-version.h"
 
 module Development.IDE.Spans.Documentation (
     getDocumentation
@@ -36,6 +37,7 @@ import           HscTypes                       (HscEnv (hsc_dflags))
 import           Language.LSP.Types             (filePathToUri, getUri)
 import           Name
 import           NameEnv
+import           Packages
 import           SrcLoc                         (RealLocated)
 import           TcRnTypes
 
@@ -141,7 +143,9 @@ getDocumentation sources targetName = fromMaybe [] $ do
   pure
       $ docHeaders
       $ filter (\(L target _) -> isBetween target prevNameSpan targetNameSpan)
-      $ fold
+      $ mapMaybe (\(L l v) -> L <$> realSpan l <*> pure v)
+      $ join
+      $ M.elems
       docs
   where
     -- Get the name bound by a binding. We only concern ourselves with
@@ -154,15 +158,14 @@ getDocumentation sources targetName = fromMaybe [] $ do
     sortedNameSpans :: [Located RdrName] -> [RealSrcSpan]
     sortedNameSpans ls = nubSort (mapMaybe (realSpan . getLoc) ls)
     isBetween target before after = before <= target && target <= after
-#if MIN_VERSION_ghc(9,0,0)
-    ann = apiAnnComments . pm_annotations
-#else
-    ann = fmap filterReal . snd . pm_annotations
-    filterReal :: [Located a] -> [RealLocated a]
-    filterReal = mapMaybe (\(L l v) -> (`L`v) <$> realSpan l)
-#endif
+    ann = snd . pm_annotations
     annotationFileName :: ParsedModule -> Maybe FastString
-    annotationFileName = fmap srcSpanFile . listToMaybe . map getRealSrcSpan . fold . ann
+    annotationFileName = fmap srcSpanFile . listToMaybe . realSpans . ann
+    realSpans :: M.Map SrcSpan [Located a] -> [RealSrcSpan]
+    realSpans =
+        mapMaybe (realSpan . getLoc)
+      . join
+      . M.elems
 
 -- | Shows this part of the documentation
 docHeaders :: [RealLocated AnnotationComment]
@@ -213,7 +216,7 @@ lookupHtmlForModule mkDocPath df m = do
       -- The file might use "." or "-" as separator
       map (`intercalate` chunks) [".", "-"]
 
-lookupHtmls :: DynFlags -> Unit -> Maybe [FilePath]
+lookupHtmls :: DynFlags -> UnitId -> Maybe [FilePath]
 lookupHtmls df ui =
   -- use haddockInterfaces instead of haddockHTMLs: GHC treats haddockHTMLs as URL not path
   -- and therefore doesn't expand $topdir on Windows

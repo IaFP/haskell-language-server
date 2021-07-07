@@ -1,9 +1,8 @@
-{-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# OPTIONS_GHC -Wwarn -fno-warn-orphans #-}
 
 -- | Expression execution
-module Ide.Plugin.Eval.Code (Statement, testRanges, resultRange, evalExtensions, evalSetup, propSetup, testCheck, asStatements,myExecStmt) where
+module Ide.Plugin.Eval.Code (Statement, testRanges, resultRange, evalExtensions, evalSetup, evalExpr, propSetup, testCheck, asStatements) where
 
 import           Control.Lens                   ((^.))
 import           Data.Algorithm.Diff            (Diff, PolyDiff (..), getDiff)
@@ -11,20 +10,17 @@ import qualified Data.List.NonEmpty             as NE
 import           Data.String                    (IsString)
 import qualified Data.Text                      as T
 import           Development.IDE.Types.Location (Position (..), Range (..))
-import           GHC                            (ExecOptions, ExecResult (..),
-                                                 execStmt)
+import           GHC                            (compileExpr)
 import           GHC.LanguageExtensions.Type    (Extension (..))
-import           GhcMonad                       (Ghc, liftIO, modifySession)
-import           HscTypes
+import           GhcMonad                       (Ghc, GhcMonad, liftIO)
 import           Ide.Plugin.Eval.Types          (Language (Plain), Loc,
                                                  Located (..),
                                                  Section (sectionLanguage),
                                                  Test (..), Txt, locate,
                                                  locate0)
-import           InteractiveEval                (getContext, parseImportDecl,
-                                                 runDecls, setContext)
+import           InteractiveEval                (runDecls)
 import           Language.LSP.Types.Lens        (line, start)
-import           System.IO.Extra                (newTempFile, readFile')
+import           Unsafe.Coerce                  (unsafeCoerce)
 
 -- | Return the ranges of the expression and result parts of the given test
 testRanges :: Test -> (Range, Range)
@@ -81,6 +77,12 @@ asStmts (Example e _ _) = NE.toList e
 asStmts (Property t _ _) =
     ["prop11 = " ++ t, "(propEvaluation prop11 :: IO String)"]
 
+-- |Evaluate an expression (either a pure expression or an IO a)
+evalExpr :: GhcMonad m => [Char] -> m String
+evalExpr e = do
+    res <- compileExpr $ "asPrint (" ++ e ++ ")"
+    liftIO (unsafeCoerce res :: IO String)
+
 -- |GHC extensions required for expression evaluation
 evalExtensions :: [Extension]
 evalExtensions =
@@ -93,23 +95,13 @@ evalExtensions =
 
 -- |GHC declarations required for expression evaluation
 evalSetup :: Ghc ()
-evalSetup = do
-    preludeAsP <- parseImportDecl "import qualified Prelude as P"
-    context <- getContext
-    setContext (IIDecl preludeAsP : context)
-
--- | A wrapper of 'InteractiveEval.execStmt', capturing the execution result
-myExecStmt :: String -> ExecOptions -> Ghc (Either String (Maybe String))
-myExecStmt stmt opts = do
-    (temp, purge) <- liftIO newTempFile
-    evalPrint <- head <$> runDecls ("evalPrint x = P.writeFile "<> show temp <> " (P.show x)")
-    modifySession $ \hsc -> hsc {hsc_IC = setInteractivePrintName (hsc_IC hsc) evalPrint}
-    result <- execStmt stmt opts >>= \case
-              ExecComplete (Left err) _ -> pure $ Left $ show err
-              ExecComplete (Right _) _ -> liftIO $ Right . (\x -> if null x then Nothing else Just x) <$> readFile' temp
-              ExecBreak{} -> pure $ Right $ Just "breakpoints are not supported"
-    liftIO purge
-    pure result
+evalSetup =
+    mapM_
+        runDecls
+        [ "class Print f where asPrint :: f -> IO String"
+        , "instance Show a => Print (IO a) where asPrint io = io >>= return . show"
+        , "instance Show a => Print a where asPrint a = return (show a)"
+        ]
 
 {- |GHC declarations required to execute test properties
 

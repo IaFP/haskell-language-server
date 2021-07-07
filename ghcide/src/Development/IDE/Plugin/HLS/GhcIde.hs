@@ -1,34 +1,29 @@
 {-# LANGUAGE DuplicateRecordFields #-}
-{-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 -- | Exposes the ghcide features as an HLS plugin
 module Development.IDE.Plugin.HLS.GhcIde
   (
     descriptors
   ) where
-import           Control.Monad.IO.Class
-import           Development.IDE
-import           Development.IDE.LSP.HoverDefinition
-import qualified Development.IDE.LSP.Notifications   as Notifications
-import           Development.IDE.LSP.Outline
-import qualified Development.IDE.Plugin.CodeAction   as CodeAction
-import qualified Development.IDE.Plugin.Completions  as Completions
-import qualified Development.IDE.Plugin.TypeLenses   as TypeLenses
-import           Ide.Types
-import           Language.LSP.Server                 (LspM)
-import           Language.LSP.Types
-import           Text.Regex.TDFA.Text                ()
+import Development.IDE
+import Development.IDE.LSP.HoverDefinition
+import Development.IDE.LSP.Outline
+import Ide.Types
+import Language.LSP.Types
+import Language.LSP.Server (LspM)
+import Text.Regex.TDFA.Text()
+import qualified Development.IDE.Plugin.CodeAction as CodeAction
+import qualified Development.IDE.Plugin.Completions as Completions
+import qualified Development.IDE.Plugin.TypeLenses as TypeLenses
+import Control.Monad.IO.Class
 
 descriptors :: [PluginDescriptor IdeState]
 descriptors =
   [ descriptor "ghcide-hover-and-symbols",
-    CodeAction.iePluginDescriptor "ghcide-code-actions-imports-exports",
-    CodeAction.typeSigsPluginDescriptor "ghcide-code-actions-type-signatures",
-    CodeAction.bindingsPluginDescriptor "ghcide-code-actions-bindings",
-    CodeAction.fillHolePluginDescriptor "ghcide-code-actions-fill-holes",
+    CodeAction.descriptor "ghcide-code-actions",
     Completions.descriptor "ghcide-completions",
-    TypeLenses.descriptor "ghcide-type-lenses",
-    Notifications.descriptor "ghcide-core"
+    TypeLenses.descriptor "ghcide-type-lenses"
   ]
 
 -- ---------------------------------------------------------------------
@@ -36,8 +31,7 @@ descriptors =
 descriptor :: PluginId -> PluginDescriptor IdeState
 descriptor plId = (defaultPluginDescriptor plId)
   { pluginHandlers = mkPluginHandler STextDocumentHover hover'
-                  <> mkPluginHandler STextDocumentDocumentSymbol symbolsProvider,
-    pluginConfigDescriptor = defaultConfigDescriptor {configEnableGenericConfig = False}
+                  <> mkPluginHandler STextDocumentDocumentSymbol symbolsProvider
   }
 
 -- ---------------------------------------------------------------------

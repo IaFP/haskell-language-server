@@ -1,6 +1,0 @@
-cradle:
-  direct:
-    arguments:
-      - "NeedsPragmas"
-      - "TypeApplications"
-      - "NamedFieldPuns"

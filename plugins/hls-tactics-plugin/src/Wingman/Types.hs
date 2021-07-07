@@ -11,29 +11,28 @@ module Wingman.Types
   , Type
   , TyVar
   , Span
+  , Range
   ) where
 
-import           ConLike (ConLike)
-import           Control.Lens hiding (Context)
+import           Control.Lens hiding (Context, (.=))
 import           Control.Monad.Reader
 import           Control.Monad.State
+import           Data.Aeson
 import           Data.Coerce
 import           Data.Function
 import           Data.Generics.Product (field)
 import           Data.List.NonEmpty (NonEmpty (..))
+import           Data.Maybe (fromMaybe)
 import           Data.Semigroup
 import           Data.Set (Set)
 import           Data.Text (Text)
 import qualified Data.Text as T
 import           Data.Tree
-import           Development.IDE (Range)
-import           Development.IDE.Core.UseStale
 import           Development.IDE.GHC.Compat hiding (Node)
 import           Development.IDE.GHC.Orphans ()
-import           FamInstEnv (FamInstEnvs)
+import           Development.IDE.Types.Location
 import           GHC.Generics
 import           GHC.SourceGen (var)
-import           InstEnv (InstEnvs(..))
 import           OccName
 import           Refinery.Tactic
 import           System.IO.Unsafe (unsafePerformIO)
@@ -41,6 +40,7 @@ import           Type (TCvSubst, Var, eqType, nonDetCmpType, emptyTCvSubst)
 import           UniqSupply (takeUniqFromSupply, mkSplitUniqSupply, UniqSupply)
 import           Unique (nonDetCmpUnique, Uniquable, getUnique, Unique)
 import           Wingman.Debug
+import           Wingman.FeatureSet
 
 
 ------------------------------------------------------------------------------
@@ -51,15 +51,12 @@ data TacticCommand
   = Auto
   | Intros
   | Destruct
-  | DestructPun
   | Homomorphism
   | DestructLambdaCase
   | HomomorphismLambdaCase
   | DestructAll
   | UseDataCon
   | Refine
-  | BeginMetaprogram
-  | RunMetaprogram
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 -- | Generate a title for the command.
@@ -69,32 +66,39 @@ tacticTitle = (mappend "Wingman: " .) . go
     go Auto _                   = "Attempt to fill hole"
     go Intros _                 = "Introduce lambda"
     go Destruct var             = "Case split on " <> var
-    go DestructPun var          = "Split on " <> var <> " with NamedFieldPuns"
     go Homomorphism var         = "Homomorphic case split on " <> var
     go DestructLambdaCase _     = "Lambda case split"
     go HomomorphismLambdaCase _ = "Homomorphic lambda case split"
     go DestructAll _            = "Split all function arguments"
     go UseDataCon dcon          = "Use constructor " <> dcon
     go Refine _                 = "Refine hole"
-    go BeginMetaprogram _       = "Use custom tactic block"
-    go RunMetaprogram _         = "Run custom tactic"
 
 
 ------------------------------------------------------------------------------
 -- | Plugin configuration for tactics
 data Config = Config
-  { cfg_max_use_ctor_actions :: Int
-  , cfg_timeout_seconds      :: Int
-  , cfg_auto_gas             :: Int
+  { cfg_feature_set          :: FeatureSet
+  , cfg_max_use_ctor_actions :: Int
   }
-  deriving (Eq, Ord, Show)
 
 emptyConfig :: Config
-emptyConfig = Config
-  { cfg_max_use_ctor_actions = 5
-  , cfg_timeout_seconds = 2
-  , cfg_auto_gas = 4
-  }
+emptyConfig = Config defaultFeatures 5
+
+
+instance ToJSON Config where
+  toJSON Config{..} = object
+    [ "features" .= prettyFeatureSet cfg_feature_set
+    , "max_use_ctor_actions" .= cfg_max_use_ctor_actions
+    ]
+
+instance FromJSON Config where
+  parseJSON = withObject "Config" $ \obj -> do
+    cfg_feature_set          <-
+      parseFeatureSet . fromMaybe "" <$> obj .:? "features"
+    cfg_max_use_ctor_actions <-
+      fromMaybe 5 <$> obj .:? "max_use_ctor_actions"
+    pure $ Config{..}
+
 
 ------------------------------------------------------------------------------
 -- | A wrapper around 'Type' which supports equality and ordering.
@@ -133,9 +137,6 @@ instance Show Class where
 instance Show (HsExpr GhcPs) where
   show  = unsafeRender
 
-instance Show (HsExpr GhcTc) where
-  show  = unsafeRender
-
 instance Show (HsDecl GhcPs) where
   show  = unsafeRender
 
@@ -146,9 +147,6 @@ instance Show (LHsSigType GhcPs) where
   show  = unsafeRender
 
 instance Show TyCon where
-  show  = unsafeRender
-
-instance Show ConLike where
   show  = unsafeRender
 
 
@@ -210,8 +208,6 @@ data Provenance
       (Uniquely Class)     -- ^ Class
     -- | A binding explicitly written by the user.
   | UserPrv
-    -- | A binding explicitly imported by the user.
-  | ImportPrv
     -- | The recursive hypothesis. Present only in the context of the recursion
     -- tactic.
   | RecursivePrv
@@ -241,7 +237,7 @@ data PatVal = PatVal
   , pv_ancestry  :: Set OccName
     -- ^ The set of values which had to be destructed to discover this term.
     -- Always contains the scrutinee.
-  , pv_datacon   :: Uniquely ConLike
+  , pv_datacon   :: Uniquely DataCon
     -- ^ The datacon which introduced this term.
   , pv_position  :: Int
     -- ^ The position of this binding in the datacon's arguments.
@@ -261,10 +257,6 @@ instance Uniquable a => Ord (Uniquely a) where
   compare = nonDetCmpUnique `on` getUnique . getViaUnique
 
 
--- NOTE(sandy): The usage of list here is mostly for convenience, but if it's
--- ever changed, make sure to correspondingly update
--- 'jAcceptableDestructTargets' so that it correctly identifies newly
--- introduced terms.
 newtype Hypothesis a = Hypothesis
   { unHypothesis :: [HyInfo a]
   }
@@ -326,7 +318,6 @@ data TacticError
   | UnhelpfulSplit OccName
   | TooPolymorphic
   | NotInScope OccName
-  | TacticPanic String
   deriving stock (Eq)
 
 instance Show TacticError where
@@ -365,8 +356,6 @@ instance Show TacticError where
       "The tactic isn't applicable because the goal is too polymorphic"
     show (NotInScope name) =
       "Tried to do something with the out of scope name " <> show name
-    show (TacticPanic err) =
-      "PANIC: " <> err
 
 
 ------------------------------------------------------------------------------
@@ -417,44 +406,15 @@ data Context = Context
     -- ^ The functions currently being defined
   , ctxModuleFuncs   :: [(OccName, CType)]
     -- ^ Everything defined in the current module
-  , ctxConfig        :: Config
-  , ctxKnownThings   :: KnownThings
-  , ctxInstEnvs      :: InstEnvs
-  , ctxFamInstEnvs   :: FamInstEnvs
-  , ctxTheta         :: Set CType
+  , ctxFeatureSet    :: FeatureSet
   }
-
-instance Show Context where
-  show (Context {..}) = mconcat
-    [ "Context "
-    , showsPrec 10 ctxDefiningFuncs ""
-    , showsPrec 10 ctxModuleFuncs ""
-    , showsPrec 10 ctxConfig ""
-    , showsPrec 10 ctxTheta ""
-    ]
-
-
-------------------------------------------------------------------------------
--- | Things we'd like to look up, that don't exist in TysWiredIn.
-data KnownThings = KnownThings
-  { kt_semigroup :: Class
-  , kt_monoid    :: Class
-  }
+  deriving stock (Eq, Ord, Show)
 
 
 ------------------------------------------------------------------------------
 -- | An empty context
 emptyContext :: Context
-emptyContext
-  = Context
-      { ctxDefiningFuncs = mempty
-      , ctxModuleFuncs = mempty
-      , ctxConfig = emptyConfig
-      , ctxKnownThings = error "empty known things from emptyContext"
-      , ctxFamInstEnvs = mempty
-      , ctxInstEnvs = InstEnvs mempty mempty mempty
-      , ctxTheta = mempty
-      }
+emptyContext  = Context mempty mempty mempty
 
 
 newtype Rose a = Rose (Tree a)
@@ -487,7 +447,6 @@ rose a rs = Rose $ Node a $ coerce rs
 data RunTacticResults = RunTacticResults
   { rtr_trace       :: Trace
   , rtr_extract     :: LHsExpr GhcPs
-  , rtr_subgoals    :: [Judgement]
   , rtr_other_solns :: [Synthesized (LHsExpr GhcPs)]
   , rtr_jdg         :: Judgement
   , rtr_ctx         :: Context
@@ -513,16 +472,4 @@ instance Show UserFacingMessage where
   show TimedOut                = "Wingman timed out while trying to find a solution"
   show NothingToDo             = "Nothing to do"
   show (InfrastructureError t) = "Internal error: " <> T.unpack t
-
-
-data HoleSort = Hole | Metaprogram T.Text
-  deriving (Eq, Ord, Show)
-
-data HoleJudgment = HoleJudgment
-  { hj_range     :: Tracked 'Current Range
-  , hj_jdg       :: Judgement
-  , hj_ctx       :: Context
-  , hj_dflags    :: DynFlags
-  , hj_hole_sort :: HoleSort
-  }
 

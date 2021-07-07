@@ -14,14 +14,12 @@ module Development.IDE.Core.FileStore(
     VFSHandle,
     makeVFSHandle,
     makeLSPVFSHandle,
+    isFileOfInterestRule,
     resetFileStore,
     resetInterfaceStore,
     getModificationTimeImpl,
     addIdeGlobal,
-    getFileContentsImpl,
-    getModTime,
-    isWatchSupported,
-    registerFileWatches
+    getFileContentsImpl
     ) where
 
 import           Control.Concurrent.STM                       (atomically)
@@ -29,60 +27,53 @@ import           Control.Concurrent.STM.TQueue                (writeTQueue)
 import           Control.Concurrent.Strict
 import           Control.Exception
 import           Control.Monad.Extra
-import           Control.Monad.IO.Class
 import qualified Data.ByteString                              as BS
 import           Data.Either.Extra
 import qualified Data.HashMap.Strict                          as HM
+import           Data.Int                                     (Int64)
 import qualified Data.Map.Strict                              as Map
 import           Data.Maybe
 import qualified Data.Rope.UTF16                              as Rope
 import qualified Data.Text                                    as T
 import           Data.Time
-import           Data.Time.Clock.POSIX
-import           Development.IDE.Core.OfInterest              (OfInterestVar (..))
+import           Development.IDE.Core.OfInterest              (OfInterestVar (..),
+                                                               getFilesOfInterest)
 import           Development.IDE.Core.RuleTypes
 import           Development.IDE.Core.Shake
 import           Development.IDE.GHC.Orphans                  ()
-import           Development.IDE.Graph
 import           Development.IDE.Import.DependencyInformation
 import           Development.IDE.Types.Diagnostics
 import           Development.IDE.Types.Location
 import           Development.IDE.Types.Options
-import           Development.IDE.Types.Shake                  (SomeShakeValue)
+import           Development.Shake
 import           HieDb.Create                                 (deleteMissingRealFiles)
-import           Ide.Plugin.Config                            (CheckParents (..),
-                                                               Config)
+import           Ide.Plugin.Config                            (CheckParents (..))
 import           System.IO.Error
 
 #ifdef mingw32_HOST_OS
 import qualified System.Directory                             as Dir
 #else
-import           System.Posix.Files                           (getFileStatus,
-                                                               modificationTimeHiRes)
+import           Data.Time.Clock.System                       (SystemTime (MkSystemTime),
+                                                               systemToUTCTime)
+import           Foreign.C.String
+import           Foreign.C.Types
+import           Foreign.Marshal                              (alloca)
+import           Foreign.Ptr
+import           Foreign.Storable
+import qualified System.Posix.Error                           as Posix
 #endif
 
 import qualified Development.IDE.Types.Logger                 as L
 
 import qualified Data.Binary                                  as B
 import qualified Data.ByteString.Lazy                         as LBS
-import qualified Data.HashSet                                 as HSet
-import           Data.IORef.Extra                             (atomicModifyIORef_)
-import           Data.List                                    (foldl')
-import qualified Data.Text                                    as Text
-import           Development.IDE.Core.IdeConfiguration        (isWorkspaceFile)
 import           Language.LSP.Server                          hiding
                                                               (getVirtualFile)
 import qualified Language.LSP.Server                          as LSP
-import           Language.LSP.Types                           (DidChangeWatchedFilesRegistrationOptions (DidChangeWatchedFilesRegistrationOptions),
-                                                               FileChangeType (FcChanged),
+import           Language.LSP.Types                           (FileChangeType (FcChanged),
                                                                FileEvent (FileEvent),
-                                                               FileSystemWatcher (..),
-                                                               WatchKind (..),
-                                                               _watchers,
                                                                toNormalizedFilePath,
                                                                uriToFilePath)
-import qualified Language.LSP.Types                           as LSP
-import qualified Language.LSP.Types.Capabilities              as LSP
 import           Language.LSP.VFS
 import           System.FilePath
 
@@ -107,57 +98,53 @@ makeLSPVFSHandle lspEnv = VFSHandle
     , setVirtualFileContents = Nothing
    }
 
-addWatchedFileRule :: (NormalizedFilePath -> Action Bool) -> Rules ()
-addWatchedFileRule isWatched = defineNoDiagnostics $ \AddWatchedFile f -> do
-  isAlreadyWatched <- isWatched f
-  isWp <- isWorkspaceFile f
-  if isAlreadyWatched then pure (Just True) else
-    if not isWp then pure (Just False) else do
-        ShakeExtras{lspEnv} <- getShakeExtras
-        case lspEnv of
-            Just env -> fmap Just $ liftIO $ LSP.runLspT env $
-                registerFileWatches [fromNormalizedFilePath f]
-            Nothing -> pure $ Just False
+
+isFileOfInterestRule :: Rules ()
+isFileOfInterestRule = defineEarlyCutoff $ RuleNoDiagnostics $ \IsFileOfInterest f -> do
+    filesOfInterest <- getFilesOfInterest
+    let foi = maybe NotFOI IsFOI $ f `HM.lookup` filesOfInterest
+        fp  = summarize foi
+        res = (Just fp, Just foi)
+    return res
+    where
+    summarize NotFOI                   = BS.singleton 0
+    summarize (IsFOI OnDisk)           = BS.singleton 1
+    summarize (IsFOI (Modified False)) = BS.singleton 2
+    summarize (IsFOI (Modified True))  = BS.singleton 3
 
 
-getModificationTimeRule :: VFSHandle -> Rules ()
-getModificationTimeRule vfs = defineEarlyCutoff $ Rule $ \(GetModificationTime_ missingFileDiags) file ->
-    getModificationTimeImpl vfs missingFileDiags file
+getModificationTimeRule :: VFSHandle -> (NormalizedFilePath -> Action Bool) -> Rules ()
+getModificationTimeRule vfs isWatched = defineEarlyCutoff $ Rule $ \(GetModificationTime_ missingFileDiags) file ->
+    getModificationTimeImpl vfs isWatched missingFileDiags file
 
 getModificationTimeImpl :: VFSHandle
+    -> (NormalizedFilePath -> Action Bool)
     -> Bool
     -> NormalizedFilePath
     -> Action
         (Maybe BS.ByteString, ([FileDiagnostic], Maybe FileVersion))
-getModificationTimeImpl vfs missingFileDiags file = do
-    let file' = fromNormalizedFilePath file
-    let wrap time = (Just $ LBS.toStrict $ B.encode $ toRational time, ([], Just $ ModificationTime time))
-    mbVirtual <- liftIO $ getVirtualFile vfs $ filePathToUri' file
-    case mbVirtual of
-        Just (virtualFileVersion -> ver) -> do
-            alwaysRerun
-            pure (Just $ LBS.toStrict $ B.encode ver, ([], Just $ VFSVersion ver))
-        Nothing -> do
-            isWF <- use_ AddWatchedFile file
-            if isWF
-                then -- the file is watched so we can rely on FileWatched notifications,
-                        -- but also need a dependency on IsFileOfInterest to reinstall
-                        -- alwaysRerun when the file becomes VFS
-                    void (use_ IsFileOfInterest file)
-                else if isInterface file
-                    then -- interface files are tracked specially using the closed world assumption
-                        pure ()
-                    else -- in all other cases we will need to freshly check the file system
-                        alwaysRerun
-
-            liftIO $ fmap wrap (getModTime file')
-                `catch` \(e :: IOException) -> do
-                    let err | isDoesNotExistError e = "File does not exist: " ++ file'
-                            | otherwise = "IO error while reading " ++ file' ++ ", " ++ displayException e
-                        diag = ideErrorText file (T.pack err)
-                    if isDoesNotExistError e && not missingFileDiags
-                        then return (Nothing, ([], Nothing))
-                        else return (Nothing, ([diag], Nothing))
+getModificationTimeImpl vfs isWatched missingFileDiags file = do
+        let file' = fromNormalizedFilePath file
+        let wrap time@(l,s) = (Just $ LBS.toStrict $ B.encode time, ([], Just $ ModificationTime l s))
+        mbVirtual <- liftIO $ getVirtualFile vfs $ filePathToUri' file
+        -- we use 'getVirtualFile' to discriminate FOIs so make that
+        -- dependency explicit by using the IsFileOfInterest rule
+        _ <- use_ IsFileOfInterest file
+        case mbVirtual of
+            Just (virtualFileVersion -> ver) -> do
+                alwaysRerun
+                pure (Just $ LBS.toStrict $ B.encode ver, ([], Just $ VFSVersion ver))
+            Nothing -> do
+                isWF <- isWatched file
+                unless (isWF || isInterface file) alwaysRerun
+                liftIO $ fmap wrap (getModTime file')
+                    `catch` \(e :: IOException) -> do
+                        let err | isDoesNotExistError e = "File does not exist: " ++ file'
+                                | otherwise = "IO error while reading " ++ file' ++ ", " ++ displayException e
+                            diag = ideErrorText file (T.pack err)
+                        if isDoesNotExistError e && not missingFileDiags
+                            then return (Nothing, ([], Nothing))
+                            else return (Nothing, ([diag], Nothing))
 
 -- | Interface files cannot be watched, since they live outside the workspace.
 --   But interface files are private, in that only HLS writes them.
@@ -168,24 +155,25 @@ isInterface f = takeExtension (fromNormalizedFilePath f) `elem` [".hi", ".hi-boo
 -- | Reset the GetModificationTime state of interface files
 resetInterfaceStore :: ShakeExtras -> NormalizedFilePath -> IO ()
 resetInterfaceStore state f = do
-    deleteValue state GetModificationTime f
+    deleteValue state (GetModificationTime_ True) f
+    deleteValue state (GetModificationTime_ False) f
 
 -- | Reset the GetModificationTime state of watched files
 resetFileStore :: IdeState -> [FileEvent] -> IO ()
-resetFileStore ideState changes = mask $ \_ -> do
-    -- we record FOIs document versions in all the stored values
-    -- so NEVER reset FOIs to avoid losing their versions
-    OfInterestVar foisVar <- getIdeGlobalExtras (shakeExtras ideState)
-    fois <- readVar foisVar
-    forM_ changes $ \(FileEvent uri c) -> do
+resetFileStore ideState changes = mask $ \_ ->
+    forM_ changes $ \(FileEvent uri c) ->
         case c of
             FcChanged
               | Just f <- uriToFilePath uri
-              , nfp <- toNormalizedFilePath f
-              , not $ HM.member nfp fois
-              -> deleteValue (shakeExtras ideState) GetModificationTime nfp
+              -> do
+                  -- we record FOIs document versions in all the stored values
+                  -- so NEVER reset FOIs to avoid losing their versions
+                  OfInterestVar foisVar <- getIdeGlobalExtras (shakeExtras ideState)
+                  fois <- readVar foisVar
+                  unless (HM.member (toNormalizedFilePath f) fois) $ do
+                    deleteValue (shakeExtras ideState) (GetModificationTime_ True) (toNormalizedFilePath' f)
+                    deleteValue (shakeExtras ideState) (GetModificationTime_ False) (toNormalizedFilePath' f)
             _ -> pure ()
-
 
 -- Dir.getModificationTime is surprisingly slow since it performs
 -- a ton of conversions. Since we do not actually care about
@@ -196,17 +184,38 @@ resetFileStore ideState changes = mask $ \_ -> do
 -- We might also want to try speeding this up on Windows at some point.
 -- TODO leverage DidChangeWatchedFile lsp notifications on clients that
 -- support them, as done for GetFileExists
-getModTime :: FilePath -> IO POSIXTime
+getModTime :: FilePath -> IO (Int64, Int64)
 getModTime f =
 #ifdef mingw32_HOST_OS
-    utcTimeToPOSIXSeconds <$> Dir.getModificationTime f
+    do time <- Dir.getModificationTime f
+       let !day = fromInteger $ toModifiedJulianDay $ utctDay time
+           !dayTime = fromInteger $ diffTimeToPicoseconds $ utctDayTime time
+       pure (day, dayTime)
 #else
-    modificationTimeHiRes <$> getFileStatus f
+    withCString f $ \f' ->
+    alloca $ \secPtr ->
+    alloca $ \nsecPtr -> do
+        Posix.throwErrnoPathIfMinus1Retry_ "getmodtime" f $ c_getModTime f' secPtr nsecPtr
+        CTime sec <- peek secPtr
+        CLong nsec <- peek nsecPtr
+        pure (sec, nsec)
+
+-- Sadly even unix’s getFileStatus + modificationTimeHiRes is still about twice as slow
+-- as doing the FFI call ourselves :(.
+foreign import ccall "getmodtime" c_getModTime :: CString -> Ptr CTime -> Ptr CLong -> IO Int
 #endif
 
 modificationTime :: FileVersion -> Maybe UTCTime
-modificationTime VFSVersion{}             = Nothing
-modificationTime (ModificationTime posix) = Just $ posixSecondsToUTCTime posix
+modificationTime VFSVersion{} = Nothing
+modificationTime (ModificationTime large small) = Just $ internalTimeToUTCTime large small
+
+internalTimeToUTCTime :: Int64 -> Int64 -> UTCTime
+internalTimeToUTCTime large small =
+#ifdef mingw32_HOST_OS
+    UTCTime (ModifiedJulianDay $ fromIntegral large) (picosecondsToDiffTime $ fromIntegral small)
+#else
+    systemToUTCTime $ MkSystemTime large (fromIntegral small)
+#endif
 
 getFileContentsRule :: VFSHandle -> Rules ()
 getFileContentsRule vfs = define $ \GetFileContents file -> getFileContentsImpl vfs file
@@ -243,16 +252,16 @@ getFileContents f = do
         liftIO $ case foi of
           IsFOI Modified{} -> getCurrentTime
           _ -> do
-            posix <- getModTime $ fromNormalizedFilePath f
-            pure $ posixSecondsToUTCTime posix
+            (large,small) <- getModTime $ fromNormalizedFilePath f
+            pure $ internalTimeToUTCTime large small
     return (modTime, txt)
 
 fileStoreRules :: VFSHandle -> (NormalizedFilePath -> Action Bool) -> Rules ()
 fileStoreRules vfs isWatched = do
     addIdeGlobal vfs
-    getModificationTimeRule vfs
+    getModificationTimeRule vfs isWatched
     getFileContentsRule vfs
-    addWatchedFileRule isWatched
+    isFileOfInterestRule
 
 -- | Note that some buffer for a specific file has been modified but not
 -- with what changes.
@@ -270,8 +279,7 @@ setFileModified state saved nfp = do
     VFSHandle{..} <- getIdeGlobalState state
     when (isJust setVirtualFileContents) $
         fail "setFileModified can't be called on this type of VFSHandle"
-    recordDirtyKeys (shakeExtras state) GetModificationTime [nfp]
-    restartShakeSession (shakeExtras state) []
+    shakeRestart state []
     when checkParents $
       typecheckParents state nfp
 
@@ -291,56 +299,14 @@ typecheckParentsAction nfp = do
           `catch` \(e :: SomeException) -> log (show e)
         () <$ uses GetModIface rs
 
--- | Note that some keys have been modified and restart the session
+-- | Note that some buffer somewhere has been modified, but don't say what.
 --   Only valid if the virtual file system was initialised by LSP, as that
 --   independently tracks which files are modified.
-setSomethingModified :: IdeState -> [SomeShakeValue] -> IO ()
-setSomethingModified state keys = do
+setSomethingModified :: IdeState -> IO ()
+setSomethingModified state = do
     VFSHandle{..} <- getIdeGlobalState state
     when (isJust setVirtualFileContents) $
         fail "setSomethingModified can't be called on this type of VFSHandle"
     -- Update database to remove any files that might have been renamed/deleted
     atomically $ writeTQueue (indexQueue $ hiedbWriter $ shakeExtras state) deleteMissingRealFiles
-    atomicModifyIORef_ (dirtyKeys $ shakeExtras state) $ \x ->
-        foldl' (flip HSet.insert) x keys
-    void $ restartShakeSession (shakeExtras state) []
-
-registerFileWatches :: [String] -> LSP.LspT Config IO Bool
-registerFileWatches globs = do
-      watchSupported <- isWatchSupported
-      if watchSupported
-      then do
-        let
-          regParams    = LSP.RegistrationParams (List [LSP.SomeRegistration registration])
-          -- The registration ID is arbitrary and is only used in case we want to deregister (which we won't).
-          -- We could also use something like a random UUID, as some other servers do, but this works for
-          -- our purposes.
-          registration = LSP.Registration "globalFileWatches"
-                                           LSP.SWorkspaceDidChangeWatchedFiles
-                                           regOptions
-          regOptions =
-            DidChangeWatchedFilesRegistrationOptions { _watchers = List watchers }
-          -- See Note [File existence cache and LSP file watchers] for why this exists, and the choice of watch kind
-          watchKind = WatchKind { _watchCreate = True, _watchChange = True, _watchDelete = True}
-          -- See Note [Which files should we watch?] for an explanation of why the pattern is the way that it is
-          -- The patterns will be something like "**/.hs", i.e. "any number of directory segments,
-          -- followed by a file with an extension 'hs'.
-          watcher glob = FileSystemWatcher { _globPattern = glob, _kind = Just watchKind }
-          -- We use multiple watchers instead of one using '{}' because lsp-test doesn't
-          -- support that: https://github.com/bubba/lsp-test/issues/77
-          watchers = [ watcher (Text.pack glob) | glob <- globs ]
-
-        void $ LSP.sendRequest LSP.SClientRegisterCapability regParams (const $ pure ()) -- TODO handle response
-        return True
-      else return False
-
-isWatchSupported :: LSP.LspT Config IO Bool
-isWatchSupported = do
-      clientCapabilities <- LSP.getClientCapabilities
-      pure $ case () of
-            _ | LSP.ClientCapabilities{_workspace} <- clientCapabilities
-              , Just LSP.WorkspaceClientCapabilities{_didChangeWatchedFiles} <- _workspace
-              , Just LSP.DidChangeWatchedFilesClientCapabilities{_dynamicRegistration} <- _didChangeWatchedFiles
-              , Just True <- _dynamicRegistration
-                -> True
-              | otherwise -> False
+    void $ shakeRestart state []

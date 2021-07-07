@@ -7,34 +7,28 @@
 
 module Utils where
 
-import           Control.DeepSeq (deepseq)
-import qualified Control.Exception as E
-import           Control.Lens hiding (List, failing, (<.>), (.=))
+import           Control.Applicative.Combinators (skipManyTill)
+import           Control.Lens hiding (failing, (<.>))
 import           Control.Monad (unless)
 import           Control.Monad.IO.Class
 import           Data.Aeson
+import           Data.Default (Default (def))
 import           Data.Foldable
-import           Data.Function (on)
 import qualified Data.Map as M
 import           Data.Maybe
 import           Data.Text (Text)
-import qualified Data.Text as T
 import qualified Data.Text.IO as T
 import qualified Ide.Plugin.Config as Plugin
-import           Ide.Plugin.Tactic as Tactic
+import           Wingman.FeatureSet (FeatureSet, allFeatures)
+import           Wingman.LanguageServer (mkShowMessageParams)
+import           Wingman.Types
+import           Language.LSP.Test
 import           Language.LSP.Types
 import           Language.LSP.Types.Lens hiding (actions, applyEdit, capabilities, executeCommand, id, line, message, name, rename, title)
 import           System.Directory (doesFileExist)
 import           System.FilePath
-import           Test.Hls
 import           Test.Hspec
-import           Test.Hspec.Formatters (FailureReason(ExpectedButGot))
-import           Wingman.LanguageServer (mkShowMessageParams)
-import           Wingman.Types
 
-
-plugin :: PluginDescriptor IdeState
-plugin = Tactic.descriptor "tactics"
 
 ------------------------------------------------------------------------------
 -- | Get a range at the given line and column corresponding to having nothing
@@ -52,7 +46,7 @@ pointRange
 -- | Get the title of a code action.
 codeActionTitle :: (Command |? CodeAction) -> Maybe Text
 codeActionTitle InL{}                               = Nothing
-codeActionTitle (InR(CodeAction title _ _ _ _ _ _ _)) = Just title
+codeActionTitle (InR(CodeAction title _ _ _ _ _ _)) = Just title
 
 
 ------------------------------------------------------------------------------
@@ -60,7 +54,7 @@ codeActionTitle (InR(CodeAction title _ _ _ _ _ _ _)) = Just title
 mkTest
     :: Foldable t
     => String  -- ^ The test name
-    -> FilePath  -- ^ The file name stem (without extension) to load
+    -> FilePath  -- ^ The file to load
     -> Int  -- ^ Cursor line
     -> Int  -- ^ Cursor columnn
     -> t ( Bool -> Bool   -- Use 'not' for actions that shouldnt be present
@@ -69,8 +63,9 @@ mkTest
          ) -- ^ A collection of (un)expected code actions.
     -> SpecWith (Arg Bool)
 mkTest name fp line col ts = it name $ do
-  runSessionWithServer plugin tacticPath $ do
-    doc <- openDoc (fp <.> "hs") "haskell"
+  runSession testCommand fullCaps tacticPath $ do
+    setFeatureSet allFeatures
+    doc <- openDoc fp "haskell"
     _ <- waitForDiagnostics
     actions <- getCodeActions doc $ pointRange line col
     let titles = mapMaybe codeActionTitle actions
@@ -80,19 +75,36 @@ mkTest name fp line col ts = it name $ do
         (title `elem` titles) `shouldSatisfy` f
 
 
+setFeatureSet :: FeatureSet -> Session ()
+setFeatureSet features = do
+  let unObject (Object obj) = obj
+      unObject _            = undefined
+      def_config = def :: Plugin.Config
+      config =
+        def_config
+          { Plugin.plugins = M.fromList [("tactics",
+              def { Plugin.plcConfig = unObject $ toJSON $
+                emptyConfig { cfg_feature_set = features }}
+          )] <> Plugin.plugins def_config }
+
+  sendNotification SWorkspaceDidChangeConfiguration $
+    DidChangeConfigurationParams $
+      toJSON config
+
 
 mkGoldenTest
-    :: (Text -> Text -> Assertion)
+    :: FeatureSet
     -> TacticCommand
     -> Text
     -> Int
     -> Int
     -> FilePath
     -> SpecWith ()
-mkGoldenTest eq tc occ line col input =
+mkGoldenTest features tc occ line col input =
   it (input <> " (golden)") $ do
-    runSessionWithServer plugin tacticPath $ do
-      doc <- openDoc (input <.> "hs") "haskell"
+    runSession testCommand fullCaps tacticPath $ do
+      setFeatureSet features
+      doc <- openDoc input "haskell"
       _ <- waitForDiagnostics
       actions <- getCodeActions doc $ pointRange line col
       Just (InR CodeAction {_command = Just c})
@@ -100,54 +112,27 @@ mkGoldenTest eq tc occ line col input =
       executeCommand c
       _resp <- skipManyTill anyMessage (message SWorkspaceApplyEdit)
       edited <- documentContents doc
-      let expected_name = input <.> "expected" <.> "hs"
-      -- Write golden tests if they don't already exist
-      liftIO $ (doesFileExist expected_name >>=) $ flip unless $ do
-        T.writeFile expected_name edited
-      expected <- liftIO $ T.readFile expected_name
-      liftIO $ edited `eq` expected
-
-
-mkCodeLensTest
-    :: FilePath
-    -> SpecWith ()
-mkCodeLensTest input =
-  it (input <> " (golden)") $ do
-    runSessionWithServer plugin tacticPath $ do
-      doc <- openDoc (input <.> "hs") "haskell"
-      _ <- waitForDiagnostics
-      lenses <- fmap (reverse . filter isWingmanLens) $ getCodeLenses doc
-      for_ lenses $ \(CodeLens _ (Just cmd) _) ->
-        executeCommand cmd
-      _resp <- skipManyTill anyMessage (message SWorkspaceApplyEdit)
-      edited <- documentContents doc
-      let expected_name = input <.> "expected" <.> "hs"
+      let expected_name = tacticPath </> input <.> "expected"
       -- Write golden tests if they don't already exist
       liftIO $ (doesFileExist expected_name >>=) $ flip unless $ do
         T.writeFile expected_name edited
       expected <- liftIO $ T.readFile expected_name
       liftIO $ edited `shouldBe` expected
 
-
-
-isWingmanLens :: CodeLens -> Bool
-isWingmanLens (CodeLens _ (Just (Command _ cmd _)) _)
-    = T.isInfixOf ":tactics:" cmd
-isWingmanLens _ = False
-
-
 mkShowMessageTest
-    :: TacticCommand
+    :: FeatureSet
+    -> TacticCommand
     -> Text
     -> Int
     -> Int
     -> FilePath
     -> UserFacingMessage
     -> SpecWith ()
-mkShowMessageTest tc occ line col input ufm =
+mkShowMessageTest features tc occ line col input ufm =
   it (input <> " (golden)") $ do
-    runSessionWithServer plugin tacticPath $ do
-      doc <- openDoc (input <.> "hs") "haskell"
+    runSession testCommand fullCaps tacticPath $ do
+      setFeatureSet features
+      doc <- openDoc input "haskell"
       _ <- waitForDiagnostics
       actions <- getCodeActions doc $ pointRange line col
       Just (InR CodeAction {_command = Just c})
@@ -158,40 +143,7 @@ mkShowMessageTest tc occ line col input ufm =
 
 
 goldenTest :: TacticCommand -> Text -> Int -> Int -> FilePath -> SpecWith ()
-goldenTest = mkGoldenTest shouldBe
-
-goldenTestNoWhitespace :: TacticCommand -> Text -> Int -> Int -> FilePath -> SpecWith ()
-goldenTestNoWhitespace = mkGoldenTest shouldBeIgnoringSpaces
-
-
-shouldBeIgnoringSpaces :: Text -> Text -> Assertion
-shouldBeIgnoringSpaces = assertFun f ""
-  where
-    f = (==) `on` T.unwords . T.words
-
-
-assertFun
-    :: Show a
-    => (a -> a -> Bool)
-    -> String -- ^ The message prefix
-    -> a      -- ^ The expected value
-    -> a      -- ^ The actual value
-    -> Assertion
-assertFun eq preface expected actual =
-  unless (eq actual expected) $ do
-    (prefaceMsg
-      `deepseq` expectedMsg
-      `deepseq` actualMsg
-      `deepseq`
-        E.throwIO
-          (HUnitFailure Nothing $ show $ ExpectedButGot prefaceMsg expectedMsg actualMsg))
-  where
-    prefaceMsg
-      | null preface = Nothing
-      | otherwise = Just preface
-    expectedMsg = show expected
-    actualMsg = show actual
-
+goldenTest = mkGoldenTest allFeatures
 
 
 ------------------------------------------------------------------------------
@@ -202,6 +154,10 @@ failing _ _ = pure ()
 
 tacticPath :: FilePath
 tacticPath = "test/golden"
+
+
+testCommand :: String
+testCommand = "test-server"
 
 
 executeCommandWithResp :: Command -> Session (ResponseMessage 'WorkspaceExecuteCommand)

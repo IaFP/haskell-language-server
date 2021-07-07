@@ -1,4 +1,4 @@
 module T26 where
-import Util ()
+import T25 ()
 
 -- >>> "hello"

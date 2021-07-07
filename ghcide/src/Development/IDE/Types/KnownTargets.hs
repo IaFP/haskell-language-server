@@ -14,11 +14,11 @@ import           Development.IDE.Types.Location
 import           GHC.Generics
 
 -- | A mapping of module name to known files
-type KnownTargets = HashMap Target (HashSet NormalizedFilePath)
+type KnownTargets = HashMap Target [NormalizedFilePath]
 
 data Target = TargetModule ModuleName | TargetFile NormalizedFilePath
   deriving ( Eq, Generic, Show )
   deriving anyclass (Hashable, NFData)
 
 toKnownFiles :: KnownTargets -> HashSet NormalizedFilePath
-toKnownFiles = HSet.unions . HMap.elems
+toKnownFiles = HSet.fromList . concat . HMap.elems

@@ -1,60 +1,52 @@
-{-# LANGUAGE CPP               #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards   #-}
 
 module Wingman.LanguageServer.TacticProviders
   ( commandProvider
   , commandTactic
   , tcCommandId
   , TacticParams (..)
-  , TacticProviderData (..)
-  , useNameFromHypothesis
   ) where
 
 import           Control.Monad
-import           Control.Monad.Reader (runReaderT)
+import           Control.Monad.Error.Class (MonadError (throwError))
 import           Data.Aeson
 import           Data.Bool (bool)
 import           Data.Coerce
+import qualified Data.Map as M
 import           Data.Maybe
 import           Data.Monoid
 import qualified Data.Text as T
 import           Data.Traversable
 import           DataCon (dataConName)
-import           Development.IDE.Core.UseStale (Tracked, Age(..))
 import           Development.IDE.GHC.Compat
 import           GHC.Generics
 import           GHC.LanguageExtensions.Type (Extension (LambdaCase))
+import           Wingman.Auto
+import           Wingman.FeatureSet
+import           Wingman.GHC
+import           Wingman.Judgements
+import           Wingman.Tactics
+import           Wingman.Types
 import           Ide.PluginUtils
 import           Ide.Types
 import           Language.LSP.Types
 import           OccName
 import           Prelude hiding (span)
-import           Wingman.Auto
-import           Wingman.GHC
-import           Wingman.Judgements
-import           Wingman.Machinery (useNameFromHypothesis)
-import           Wingman.Metaprogramming.Lexer (ParserContext)
-import           Wingman.Metaprogramming.Parser (parseMetaprogram)
-import           Wingman.Tactics
-import           Wingman.Types
+import           Refinery.Tactic (goal)
 
 
 ------------------------------------------------------------------------------
 -- | A mapping from tactic commands to actual tactics for refinery.
-commandTactic :: ParserContext -> TacticCommand -> T.Text -> IO (TacticsM ())
-commandTactic _ Auto                   = pure . const auto
-commandTactic _ Intros                 = pure . const intros
-commandTactic _ Destruct               = pure . useNameFromHypothesis destruct . mkVarOcc . T.unpack
-commandTactic _ DestructPun            = pure . useNameFromHypothesis destructPun . mkVarOcc . T.unpack
-commandTactic _ Homomorphism           = pure . useNameFromHypothesis homo . mkVarOcc . T.unpack
-commandTactic _ DestructLambdaCase     = pure . const destructLambdaCase
-commandTactic _ HomomorphismLambdaCase = pure . const homoLambdaCase
-commandTactic _ DestructAll            = pure . const destructAll
-commandTactic _ UseDataCon             = pure . userSplit . mkVarOcc . T.unpack
-commandTactic _ Refine                 = pure . const refine
-commandTactic _ BeginMetaprogram       = pure . const metaprogram
-commandTactic c RunMetaprogram         = flip runReaderT c . parseMetaprogram
+commandTactic :: TacticCommand -> OccName -> TacticsM ()
+commandTactic Auto                   = const auto
+commandTactic Intros                 = const intros
+commandTactic Destruct               = useNameFromHypothesis destruct
+commandTactic Homomorphism           = useNameFromHypothesis homo
+commandTactic DestructLambdaCase     = const destructLambdaCase
+commandTactic HomomorphismLambdaCase = const homoLambdaCase
+commandTactic DestructAll            = const destructAll
+commandTactic UseDataCon             = userSplit
+commandTactic Refine                 = const refine
 
 
 ------------------------------------------------------------------------------
@@ -63,15 +55,12 @@ tacticKind :: TacticCommand -> T.Text
 tacticKind Auto                   = "fillHole"
 tacticKind Intros                 = "introduceLambda"
 tacticKind Destruct               = "caseSplit"
-tacticKind DestructPun            = "caseSplitPun"
 tacticKind Homomorphism           = "homomorphicCaseSplit"
 tacticKind DestructLambdaCase     = "lambdaCase"
 tacticKind HomomorphismLambdaCase = "homomorphicLambdaCase"
 tacticKind DestructAll            = "splitFuncArgs"
 tacticKind UseDataCon             = "useConstructor"
 tacticKind Refine                 = "refine"
-tacticKind BeginMetaprogram       = "beginMetaprogram"
-tacticKind RunMetaprogram         = "runMetaprogram"
 
 
 ------------------------------------------------------------------------------
@@ -81,15 +70,12 @@ tacticPreferred :: TacticCommand -> Bool
 tacticPreferred Auto                   = True
 tacticPreferred Intros                 = True
 tacticPreferred Destruct               = True
-tacticPreferred DestructPun            = False
 tacticPreferred Homomorphism           = False
 tacticPreferred DestructLambdaCase     = False
 tacticPreferred HomomorphismLambdaCase = False
 tacticPreferred DestructAll            = True
 tacticPreferred UseDataCon             = True
 tacticPreferred Refine                 = True
-tacticPreferred BeginMetaprogram       = False
-tacticPreferred RunMetaprogram         = True
 
 
 mkTacticKind :: TacticCommand -> CodeActionKind
@@ -101,75 +87,47 @@ mkTacticKind =
 -- | Mapping from tactic commands to their contextual providers. See 'provide',
 -- 'filterGoalType' and 'filterBindingType' for the nitty gritty.
 commandProvider :: TacticCommand -> TacticProvider
-commandProvider Auto  =
-  requireHoleSort (== Hole) $
-  provide Auto ""
+commandProvider Auto  = provide Auto ""
 commandProvider Intros =
-  requireHoleSort (== Hole) $
   filterGoalType isFunction $
     provide Intros ""
 commandProvider Destruct =
-  requireHoleSort (== Hole) $
   filterBindingType destructFilter $ \occ _ ->
     provide Destruct $ T.pack $ occNameString occ
-commandProvider DestructPun =
-  requireHoleSort (== Hole) $
-    filterBindingType destructPunFilter $ \occ _ ->
-      provide DestructPun $ T.pack $ occNameString occ
 commandProvider Homomorphism =
-  requireHoleSort (== Hole) $
   filterBindingType homoFilter $ \occ _ ->
     provide Homomorphism $ T.pack $ occNameString occ
 commandProvider DestructLambdaCase =
-  requireHoleSort (== Hole) $
   requireExtension LambdaCase $
     filterGoalType (isJust . lambdaCaseable) $
       provide DestructLambdaCase ""
 commandProvider HomomorphismLambdaCase =
-  requireHoleSort (== Hole) $
   requireExtension LambdaCase $
     filterGoalType ((== Just True) . lambdaCaseable) $
       provide HomomorphismLambdaCase ""
 commandProvider DestructAll =
-  requireHoleSort (== Hole) $
+  requireFeature FeatureDestructAll $
     withJudgement $ \jdg ->
       case _jIsTopHole jdg && jHasBoundArgs jdg of
         True  -> provide DestructAll ""
         False -> mempty
 commandProvider UseDataCon =
-  requireHoleSort (== Hole) $
   withConfig $ \cfg ->
-    filterTypeProjection
-        ( guardLength (<= cfg_max_use_ctor_actions cfg)
-        . fromMaybe []
-        . fmap fst
-        . tacticsGetDataCons
-        ) $ \dcon ->
-      provide UseDataCon
-        . T.pack
-        . occNameString
-        . occName
-        $ dataConName dcon
+    requireFeature FeatureUseDataCon $
+      filterTypeProjection
+          ( guardLength (<= cfg_max_use_ctor_actions cfg)
+          . fromMaybe []
+          . fmap fst
+          . tacticsGetDataCons
+          ) $ \dcon ->
+        provide UseDataCon
+          . T.pack
+          . occNameString
+          . occName
+          $ dataConName dcon
 commandProvider Refine =
-  requireHoleSort (== Hole) $
+  requireFeature FeatureRefineHole $
     provide Refine ""
-commandProvider BeginMetaprogram =
-  requireGHC88OrHigher $
-  requireHoleSort (== Hole) $
-    provide BeginMetaprogram ""
-commandProvider RunMetaprogram =
-  requireGHC88OrHigher $
-  withMetaprogram $ \mp ->
-    provide RunMetaprogram mp
-
-
-requireGHC88OrHigher :: TacticProvider -> TacticProvider
-requireGHC88OrHigher tp tpd =
-#if __GLASGOW_HASKELL__ >= 808
-  tp tpd
-#else
-  mempty
-#endif
 
 
 ------------------------------------------------------------------------------
@@ -182,50 +140,41 @@ guardLength f as = bool [] as $ f $ length as
 -- | A 'TacticProvider' is a way of giving context-sensitive actions to the LS
 -- UI.
 type TacticProvider
-     = TacticProviderData
+     = DynFlags
+    -> Config
+    -> PluginId
+    -> Uri
+    -> Range
+    -> Judgement
     -> IO [Command |? CodeAction]
-
-
-data TacticProviderData = TacticProviderData
-  { tpd_dflags :: DynFlags
-  , tpd_config :: Config
-  , tpd_plid   :: PluginId
-  , tpd_uri    :: Uri
-  , tpd_range  :: Tracked 'Current Range
-  , tpd_jdg    :: Judgement
-  , tpd_hole_sort :: HoleSort
-  }
 
 
 data TacticParams = TacticParams
     { tp_file     :: Uri    -- ^ Uri of the file to fill the hole in
-    , tp_range    :: Tracked 'Current Range  -- ^ The range of the hole
+    , tp_range    :: Range  -- ^ The range of the hole
     , tp_var_name :: T.Text
     }
   deriving stock (Show, Eq, Generic)
   deriving anyclass (ToJSON, FromJSON)
 
 
-requireHoleSort :: (HoleSort -> Bool) -> TacticProvider -> TacticProvider
-requireHoleSort p tp tpd =
-  case p $ tpd_hole_sort tpd of
-    True  -> tp tpd
+------------------------------------------------------------------------------
+-- | Restrict a 'TacticProvider', making sure it appears only when the given
+-- 'Feature' is in the feature set.
+requireFeature :: Feature -> TacticProvider -> TacticProvider
+requireFeature f tp dflags cfg plId uri range jdg = do
+  case hasFeature f $ cfg_feature_set cfg of
+    True  -> tp dflags cfg plId uri range jdg
     False -> pure []
-
-withMetaprogram :: (T.Text -> TacticProvider) -> TacticProvider
-withMetaprogram tp tpd =
-  case tpd_hole_sort tpd of
-    Metaprogram mp -> tp mp tpd
-    _ -> pure []
 
 
 ------------------------------------------------------------------------------
 -- | Restrict a 'TacticProvider', making sure it appears only when the given
 -- predicate holds for the goal.
 requireExtension :: Extension -> TacticProvider -> TacticProvider
-requireExtension ext tp tpd =
-  case xopt ext $ tpd_dflags tpd of
-    True  -> tp tpd
+requireExtension ext tp dflags cfg plId uri range jdg =
+  case xopt ext dflags of
+    True  -> tp dflags cfg plId uri range jdg
     False -> pure []
 
 
@@ -233,9 +182,9 @@ requireExtension ext tp tpd =
 -- | Restrict a 'TacticProvider', making sure it appears only when the given
 -- predicate holds for the goal.
 filterGoalType :: (Type -> Bool) -> TacticProvider -> TacticProvider
-filterGoalType p tp tpd =
-  case p $ unCType $ jGoal $ tpd_jdg tpd of
-    True  -> tp tpd
+filterGoalType p tp dflags cfg plId uri range jdg =
+  case p $ unCType $ jGoal jdg of
+    True  -> tp dflags cfg plId uri range jdg
     False -> pure []
 
 
@@ -243,7 +192,8 @@ filterGoalType p tp tpd =
 -- | Restrict a 'TacticProvider', making sure it appears only when the given
 -- predicate holds for the goal.
 withJudgement :: (Judgement -> TacticProvider) -> TacticProvider
-withJudgement tp tpd = tp (tpd_jdg tpd) tpd
+withJudgement tp dflags fs plId uri range jdg =
+  tp jdg dflags fs plId uri range jdg
 
 
 ------------------------------------------------------------------------------
@@ -253,14 +203,13 @@ filterBindingType
     :: (Type -> Type -> Bool)  -- ^ Goal and then binding types.
     -> (OccName -> Type -> TacticProvider)
     -> TacticProvider
-filterBindingType p tp tpd =
-  let jdg = tpd_jdg tpd
-      hy  = jLocalHypothesis jdg
-      g   = jGoal jdg
+filterBindingType p tp dflags cfg plId uri range jdg =
+  let hy = jHypothesis jdg
+      g  = jGoal jdg
    in fmap join $ for (unHypothesis hy) $ \hi ->
         let ty = unCType $ hi_type hi
          in case p (unCType g) ty of
-              True  -> tp (hi_name hi) ty tpd
+              True  -> tp (hi_name hi) ty dflags cfg plId uri range jdg
               False -> pure []
 
 
@@ -271,38 +220,48 @@ filterTypeProjection
     :: (Type -> [a])  -- ^ Features of the goal to look into further
     -> (a -> TacticProvider)
     -> TacticProvider
-filterTypeProjection p tp tpd =
-  fmap join $ for (p $ unCType $ jGoal $ tpd_jdg tpd) $ \a ->
-      tp a tpd
+filterTypeProjection p tp dflags cfg plId uri range jdg =
+  fmap join $ for (p $ unCType $ jGoal jdg) $ \a ->
+      tp a dflags cfg plId uri range jdg
 
 
 ------------------------------------------------------------------------------
 -- | Get access to the 'Config' when building a 'TacticProvider'.
 withConfig :: (Config -> TacticProvider) -> TacticProvider
-withConfig tp tpd = tp (tpd_config tpd) tpd
+withConfig tp dflags cfg plId uri range jdg = tp cfg dflags cfg plId uri range jdg
+
+
+
+------------------------------------------------------------------------------
+-- | Lift a function over 'HyInfo's to one that takes an 'OccName' and tries to
+-- look it up in the hypothesis.
+useNameFromHypothesis :: (HyInfo CType -> TacticsM a) -> OccName -> TacticsM a
+useNameFromHypothesis f name = do
+  hy <- jHypothesis <$> goal
+  case M.lookup name $ hyByName hy of
+    Just hi -> f hi
+    Nothing -> throwError $ NotInScope name
 
 
 ------------------------------------------------------------------------------
 -- | Terminal constructor for providing context-sensitive tactics. Tactics
 -- given by 'provide' are always available.
 provide :: TacticCommand -> T.Text -> TacticProvider
-provide tc name TacticProviderData{..} = do
+provide tc name _ _ plId uri range _ = do
   let title = tacticTitle tc name
-      params = TacticParams { tp_file = tpd_uri , tp_range = tpd_range , tp_var_name = name }
-      cmd = mkLspCommand tpd_plid (tcCommandId tc) title (Just [toJSON params])
+      params = TacticParams { tp_file = uri , tp_range = range , tp_var_name = name }
+      cmd = mkLspCommand plId (tcCommandId tc) title (Just [toJSON params])
   pure
     $ pure
     $ InR
     $ CodeAction
-        { _title       = title
-        , _kind        = Just $ mkTacticKind tc
-        , _diagnostics = Nothing
-        , _isPreferred = Just $ tacticPreferred tc
-        , _disabled    = Nothing
-        , _edit        = Nothing
-        , _command     = Just cmd
-        , _xdata       = Nothing
-        }
+        title
+        (Just $ mkTacticKind tc)
+        Nothing
+        (Just $ tacticPreferred tc)
+        Nothing
+        Nothing
+    $ Just cmd
 
 
 ------------------------------------------------------------------------------
@@ -325,13 +284,4 @@ homoFilter _ _                                                     = False
 destructFilter :: Type -> Type -> Bool
 destructFilter _ (algebraicTyCon -> Just _) = True
 destructFilter _ _                          = False
-
-
-------------------------------------------------------------------------------
--- | We should show destruct punning for bindings only when those bindings have
--- usual algebraic types, and when any of their data constructors are records.
-destructPunFilter :: Type -> Type -> Bool
-destructPunFilter _ (algebraicTyCon -> Just tc) =
-  any (not . null . dataConFieldLabels) $ tyConDataCons tc
-destructPunFilter _ _                          = False
 

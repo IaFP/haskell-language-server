@@ -33,7 +33,6 @@ import           Bag
 import           Data.Maybe
 import           Data.String                       (fromString)
 import qualified Data.Text                         as T
-import qualified Development.IDE.GHC.Compat        as GHC
 import           Development.IDE.GHC.Orphans       ()
 import           Development.IDE.Types.Diagnostics as D
 import           Development.IDE.Types.Location
@@ -69,8 +68,8 @@ diagFromErrMsg diagSource dflags e =
 formatErrorWithQual :: DynFlags -> ErrMsg -> String
 formatErrorWithQual dflags e =
     Out.showSDoc dflags
-    $ Out.withPprStyle (GHC.oldMkErrStyle dflags $ errMsgContext e)
-    $ GHC.oldFormatErrDoc dflags
+    $ Out.withPprStyle (Out.mkErrStyle dflags $ errMsgContext e)
+    $ ErrUtils.formatErrDoc dflags
     $ ErrUtils.errMsgDoc e
 
 diagFromErrMsgs :: T.Text -> DynFlags -> Bag ErrMsg -> [FileDiagnostic]
@@ -78,9 +77,8 @@ diagFromErrMsgs diagSource dflags = concatMap (diagFromErrMsg diagSource dflags)
 
 -- | Convert a GHC SrcSpan to a DAML compiler Range
 srcSpanToRange :: SrcSpan -> Maybe Range
-srcSpanToRange (UnhelpfulSpan _)         = Nothing
-srcSpanToRange (GHC.OldRealSrcSpan real) = Just $ realSrcSpanToRange real
--- srcSpanToRange = fmap realSrcSpanToRange . realSpan
+srcSpanToRange (UnhelpfulSpan _)  = Nothing
+srcSpanToRange (RealSrcSpan real) = Just $ realSrcSpanToRange real
 
 realSrcSpanToRange :: RealSrcSpan -> Range
 realSrcSpanToRange real =
@@ -95,8 +93,7 @@ realSrcLocToPosition real =
 -- FIXME This may not be an _absolute_ file name, needs fixing.
 srcSpanToFilename :: SrcSpan -> Maybe FilePath
 srcSpanToFilename (UnhelpfulSpan _)  = Nothing
-srcSpanToFilename (GHC.OldRealSrcSpan real) = Just $ FS.unpackFS $ srcSpanFile real
--- srcSpanToFilename = fmap (FS.unpackFS . srcSpanFile) . realSpan
+srcSpanToFilename (RealSrcSpan real) = Just $ FS.unpackFS $ srcSpanFile real
 
 realSrcSpanToLocation :: RealSrcSpan -> Location
 realSrcSpanToLocation real = Location file (realSrcSpanToRange real)
@@ -110,7 +107,7 @@ srcSpanToLocation src = do
   pure $ Location (fromNormalizedUri $ filePathToUri' $ toNormalizedFilePath' fs) rng
 
 rangeToSrcSpan :: NormalizedFilePath -> Range -> SrcSpan
-rangeToSrcSpan = fmap GHC.OldRealSrcSpan . rangeToRealSrcSpan
+rangeToSrcSpan = fmap RealSrcSpan . rangeToRealSrcSpan
 
 rangeToRealSrcSpan
     :: NormalizedFilePath -> Range -> RealSrcSpan
@@ -152,7 +149,7 @@ diagFromString diagSource sev sp x = [diagFromText diagSource sev sp $ T.pack x]
 
 -- | Produces an "unhelpful" source span with the given string.
 noSpan :: String -> SrcSpan
-noSpan = GHC.oldUnhelpfulSpan  . FS.fsLit
+noSpan = UnhelpfulSpan . FS.fsLit
 
 
 -- | creates a span with zero length in the filename of the argument passed
@@ -163,8 +160,8 @@ zeroSpan file = realSrcLocSpan (mkRealSrcLoc file 1 1)
 realSpan :: SrcSpan
          -> Maybe RealSrcSpan
 realSpan = \case
-  GHC.OldRealSrcSpan r -> Just r
-  UnhelpfulSpan _      -> Nothing
+  RealSrcSpan r   -> Just r
+  UnhelpfulSpan _ -> Nothing
 
 
 -- | Catch the errors thrown by GHC (SourceErrors and

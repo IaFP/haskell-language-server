@@ -4,6 +4,7 @@
 {-# LANGUAGE CPP        #-}
 {-# LANGUAGE GADTs      #-}
 {-# LANGUAGE RankNTypes #-}
+#include "ghc-api-version.h"
 
 -- | Based on https://ghc.haskell.org/trac/ghc/wiki/Commentary/Compiler/API.
 --   Given a list of paths to find libraries, and a file to compile, produce a list of 'CoreModule' values.
@@ -56,7 +57,7 @@ import           LoadIface                         (loadModuleInterface)
 
 import           Lexer
 import qualified Parser
-#if MIN_VERSION_ghc(8,10,0)
+#if MIN_GHC_API_VERSION(8,10,0)
 import           Control.DeepSeq                   (force, rnf)
 #else
 import           Control.DeepSeq                   (rnf)
@@ -80,15 +81,7 @@ import           MkIface
 import           StringBuffer                      as SB
 import           TcIface                           (typecheckIface)
 import           TcRnMonad                         hiding (newUnique)
-#if MIN_VERSION_ghc(9,0,1)
-import           GHC.Builtin.Names
-import           GHC.Iface.Recomp
-import           GHC.Tc.Gen.Splice
-import           GHC.Tc.Types.Evidence             (EvBind)
-#else
-import           PrelNames
 import           TcSplice
-#endif
 import           TidyPgm
 
 import           Bag
@@ -111,6 +104,7 @@ import qualified GHC.LanguageExtensions            as LangExt
 import           HeaderInfo
 import           Linker                            (unload)
 import           Maybes                            (orElse)
+import           PrelNames
 import           System.Directory
 import           System.FilePath
 import           System.IO.Extra                   (fixIO, newTempFileWithin)
@@ -150,10 +144,10 @@ computePackageDeps
     -> IO (Either [FileDiagnostic] [InstalledUnitId])
 computePackageDeps env pkg = do
     let dflags = hsc_dflags env
-    case oldLookupInstalledPackage dflags pkg of
+    case lookupInstalledPackage dflags pkg of
         Nothing -> return $ Left [ideErrorText (toNormalizedFilePath' noFilePath) $
             T.pack $ "unknown package: " ++ show pkg]
-        Just pkgInfo -> return $ Right $ unitDepends pkgInfo
+        Just pkgInfo -> return $ Right $ depends pkgInfo
 
 typecheckModule :: IdeDefer
                 -> HscEnv
@@ -240,7 +234,7 @@ mkHiFileResultNoCompile session tcm = do
       tcGblEnv = tmrTypechecked tcm
   details <- makeSimpleDetails hsc_env_tmp tcGblEnv
   sf <- finalSafeMode (ms_hspp_opts ms) tcGblEnv
-#if MIN_VERSION_ghc(8,10,0)
+#if MIN_GHC_API_VERSION(8,10,0)
   iface <- mkIfaceTc hsc_env_tmp sf details tcGblEnv
 #else
   (iface, _) <- mkIfaceTc hsc_env_tmp Nothing sf details tcGblEnv
@@ -274,10 +268,7 @@ mkHiFileResultCompile session' tcm simplified_guts ltype = catchErrs $ do
         (guts, details) <- tidyProgram session simplified_guts
         (diags, linkable) <- genLinkable session ms guts
         pure (linkable, details, diags)
-#if MIN_VERSION_ghc(9,0,1)
-  let !partial_iface = force (mkPartialIface session details simplified_guts)
-  final_iface <- mkFullIface session partial_iface Nothing
-#elif MIN_VERSION_ghc(8,10,0)
+#if MIN_GHC_API_VERSION(8,10,0)
   let !partial_iface = force (mkPartialIface session details simplified_guts)
   final_iface <- mkFullIface session partial_iface
 #else
@@ -339,18 +330,14 @@ generateObjectCode session summary guts = do
               (warnings, dot_o_fp) <-
                 withWarnings "object" $ \_tweak -> do
                       let summary' = _tweak summary
-#if MIN_VERSION_ghc(8,10,0)
+#if MIN_GHC_API_VERSION(8,10,0)
                           target = defaultObjectTarget $ hsc_dflags session
 #else
                           target = defaultObjectTarget $ targetPlatform $ hsc_dflags session
 #endif
                           session' = session { hsc_dflags = updOptLevel 0 $ (ms_hspp_opts summary') { outputFile = Just dot_o , hscTarget = target}}
-#if MIN_VERSION_ghc(9,0,1)
-                      (outputFilename, _mStub, _foreign_files, _cinfos) <- hscGenHardCode session' guts
-#else
                       (outputFilename, _mStub, _foreign_files) <- hscGenHardCode session' guts
-#endif
-#if MIN_VERSION_ghc(8,10,0)
+#if MIN_GHC_API_VERSION(8,10,0)
                                 (ms_location summary')
 #else
                                 summary'
@@ -373,7 +360,7 @@ generateByteCode hscEnv summary guts = do
                       let summary' = _tweak summary
                           session = hscEnv { hsc_dflags = ms_hspp_opts summary' }
                       hscInteractive session guts
-#if MIN_VERSION_ghc(8,10,0)
+#if MIN_GHC_API_VERSION(8,10,0)
                                 (ms_location summary')
 #else
                                 summary'
@@ -432,7 +419,7 @@ unnecessaryDeprecationWarningFlags
     , Opt_WarnUnusedMatches
     , Opt_WarnUnusedTypePatterns
     , Opt_WarnUnusedForalls
-#if MIN_VERSION_ghc(8,10,0)
+#if MIN_GHC_API_VERSION(8,10,0)
     , Opt_WarnUnusedRecordWildcards
 #endif
     , Opt_WarnInaccessibleCode
@@ -477,15 +464,7 @@ generateHieAsts hscEnv tcm =
     -- don't export an interface which allows for additional information to be added to hie files.
     let fake_splice_binds = listToBag (map (mkVarBind unitDataConId) (spliceExpresions $ tmrTopLevelSplices tcm))
         real_binds = tcg_binds $ tmrTypechecked tcm
-#if MIN_VERSION_ghc(9,0,1)
-        ts = tmrTypechecked tcm :: TcGblEnv
-        top_ev_binds = tcg_ev_binds ts :: Bag EvBind
-        insts = tcg_insts ts :: [ClsInst]
-        tcs = tcg_tcs ts :: [TyCon]
-    Just <$> GHC.enrichHie (fake_splice_binds `unionBags` real_binds) (tmrRenamed tcm) top_ev_binds insts tcs
-#else
     Just <$> GHC.enrichHie (fake_splice_binds `unionBags` real_binds) (tmrRenamed tcm)
-#endif
   where
     dflags = hsc_dflags hscEnv
 
@@ -528,9 +507,7 @@ spliceExpresions Splices{..} =
 -- can just increment the 'indexCompleted' TVar and exit.
 --
 indexHieFile :: ShakeExtras -> ModSummary -> NormalizedFilePath -> Fingerprint -> Compat.HieFile -> IO ()
-indexHieFile se mod_summary srcPath hash hf = do
- IdeOptions{optProgressStyle} <- getIdeOptionsIO se
- atomically $ do
+indexHieFile se mod_summary srcPath hash hf = atomically $ do
   pending <- readTVar indexPending
   case HashMap.lookup srcPath pending of
     Just pendingHash | pendingHash == hash -> pure () -- An index is already scheduled
@@ -546,7 +523,7 @@ indexHieFile se mod_summary srcPath hash hf = do
             -- If the hash in the pending list doesn't match the current hash, then skip
             Just pendingHash -> pendingHash /= hash
         unless newerScheduled $ do
-          pre optProgressStyle
+          pre
           addRefsFromLoaded db targetPath (RealFile $ fromNormalizedFilePath srcPath) hash hf
           post
   where
@@ -555,7 +532,7 @@ indexHieFile se mod_summary srcPath hash hf = do
     HieDbWriter{..} = hiedbWriter se
 
     -- Get a progress token to report progress and update it for the current file
-    pre style = do
+    pre = do
       tok <- modifyVar indexProgressToken $ fmap dupe . \case
         x@(Just _) -> pure x
         -- Create a token if we don't already have one
@@ -568,7 +545,7 @@ indexHieFile se mod_summary srcPath hash hf = do
               _ <- LSP.sendRequest LSP.SWindowWorkDoneProgressCreate (LSP.WorkDoneProgressCreateParams u) (const $ pure ())
               LSP.sendNotification LSP.SProgress $ LSP.ProgressParams u $
                 LSP.Begin $ LSP.WorkDoneProgressBeginParams
-                  { _title = "Indexing"
+                  { _title = "Indexing references from:"
                   , _cancellable = Nothing
                   , _message = Nothing
                   , _percentage = Nothing
@@ -580,26 +557,15 @@ indexHieFile se mod_summary srcPath hash hf = do
         remaining <- HashMap.size <$> readTVar indexPending
         pure (done, remaining)
 
+      let progress = " (" <> T.pack (show done) <> "/" <> T.pack (show $ done + remaining) <> ")..."
+
       whenJust (lspEnv se) $ \env -> whenJust tok $ \tok -> LSP.runLspT env $
         LSP.sendNotification LSP.SProgress $ LSP.ProgressParams tok $
-          LSP.Report $
-            case style of
-                Percentage -> LSP.WorkDoneProgressReportParams
-                    { _cancellable = Nothing
-                    , _message = Nothing
-                    , _percentage = Just (100 * fromIntegral done / fromIntegral (done + remaining) )
-                    }
-                Explicit -> LSP.WorkDoneProgressReportParams
-                    { _cancellable = Nothing
-                    , _message = Just $
-                        T.pack " (" <> T.pack (show done) <> "/" <> T.pack (show $ done + remaining) <> ")..."
-                    , _percentage = Nothing
-                    }
-                NoProgress -> LSP.WorkDoneProgressReportParams
-                  { _cancellable = Nothing
-                  , _message = Nothing
-                  , _percentage = Nothing
-                  }
+          LSP.Report $ LSP.WorkDoneProgressReportParams
+            { _cancellable = Nothing
+            , _message = Just $ T.pack (fromNormalizedFilePath srcPath) <> progress
+            , _percentage = Nothing
+            }
 
     -- Report the progress once we are done indexing this file
     post = do
@@ -672,7 +638,7 @@ setupFinderCache mss session = do
 
     -- Make modules available for others that import them,
     -- by putting them in the finder cache.
-    let ims  = map (installedModule (thisInstalledUnitId $ hsc_dflags session) . moduleName . ms_mod) mss
+    let ims  = map (InstalledModule (thisInstalledUnitId $ hsc_dflags session) . moduleName . ms_mod) mss
         ifrs = zipWith (\ms -> InstalledFound (ms_location ms)) mss ims
     -- set the target and module graph in the session
         graph = mkModuleGraph mss
@@ -730,7 +696,7 @@ getModSummaryFromImports env fp modTime contents = do
 
         mod = fmap unLoc mb_mod `orElse` mAIN_NAME
 
-        (src_idecls, ord_idecls) = partition ((== IsBoot) . ideclSource.unLoc) imps
+        (src_idecls, ord_idecls) = partition (ideclSource.unLoc) imps
 
         -- GHC.Prim doesn't exist physically, so don't go looking for it.
         ordinary_imps = filter ((/= moduleName gHC_PRIM) . unLoc
@@ -759,7 +725,7 @@ getModSummaryFromImports env fp modTime contents = do
         msrModSummary =
             ModSummary
                 { ms_mod          = modl
-#if MIN_VERSION_ghc(8,8,0)
+#if MIN_GHC_API_VERSION(8,8,0)
                 , ms_hie_date     = Nothing
 #endif
                 , ms_hs_date      = modTime
@@ -799,15 +765,11 @@ parseHeader
        => DynFlags -- ^ flags to use
        -> FilePath  -- ^ the filename (for source locations)
        -> SB.StringBuffer -- ^ Haskell module source text (full Unicode is supported)
-#if MIN_VERSION_ghc(9,0,1)
-       -> ExceptT [FileDiagnostic] m ([FileDiagnostic], Located(HsModule))
-#else
        -> ExceptT [FileDiagnostic] m ([FileDiagnostic], Located(HsModule GhcPs))
-#endif
 parseHeader dflags filename contents = do
    let loc  = mkRealSrcLoc (mkFastString filename) 1 1
    case unP Parser.parseHeader (mkPState dflags contents loc) of
-#if MIN_VERSION_ghc(8,10,0)
+#if MIN_GHC_API_VERSION(8,10,0)
      PFailed pst ->
         throwE $ diagFromErrMsgs "parser" dflags $ getErrorMessages pst dflags
 #else
@@ -845,28 +807,17 @@ parseFileContents env customPreprocessor filename ms = do
        dflags = ms_hspp_opts ms
        contents = fromJust $ ms_hspp_buf ms
    case unP Parser.parseModule (mkPState dflags contents loc) of
-#if MIN_VERSION_ghc(8,10,0)
+#if MIN_GHC_API_VERSION(8,10,0)
      PFailed pst -> throwE $ diagFromErrMsgs "parser" dflags $ getErrorMessages pst dflags
 #else
      PFailed _ locErr msgErr ->
       throwE $ diagFromErrMsg "parser" dflags $ mkPlainErrMsg dflags locErr msgErr
 #endif
      POk pst rdr_module ->
-         let hpm_annotations :: ApiAnns
-             hpm_annotations =
-#if MIN_VERSION_ghc(9,0,1)
-               -- Copied from GHC.Driver.Main
-               ApiAnns {
-                      apiAnnItems = Map.fromListWith (++) $ annotations pst,
-                      apiAnnEofPos = eof_pos pst,
-                      apiAnnComments = Map.fromList (annotations_comments pst),
-                      apiAnnRogueComments = comment_q pst
-                   }
-#else
+         let hpm_annotations =
                (Map.fromListWith (++) $ annotations pst,
                  Map.fromList ((noSrcSpan,comment_q pst)
                                   :annotations_comments pst))
-#endif
              (warns, errs) = getMessages pst dflags
          in
            do

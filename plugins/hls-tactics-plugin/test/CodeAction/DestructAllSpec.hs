@@ -1,4 +1,9 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE DataKinds             #-}
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE ScopedTypeVariables   #-}
+{-# LANGUAGE TypeOperators         #-}
+{-# LANGUAGE ViewPatterns          #-}
 
 module CodeAction.DestructAllSpec where
 
@@ -13,26 +18,24 @@ spec = do
   describe "provider" $ do
     mkTest
       "Requires args on lhs of ="
-      "DestructAllProvider" 3 21
+      "DestructAllProvider.hs" 3 21
       [ (not, DestructAll, "")
       ]
     mkTest
       "Can't be a non-top-hole"
-      "DestructAllProvider" 8 19
+      "DestructAllProvider.hs" 8 19
       [ (not, DestructAll, "")
       , (id, Destruct, "a")
       , (id, Destruct, "b")
       ]
     mkTest
       "Provides a destruct all otherwise"
-      "DestructAllProvider" 12 22
+      "DestructAllProvider.hs" 12 22
       [ (id, DestructAll, "")
       ]
 
   describe "golden" $ do
-    destructAllTest 2 11 "DestructAllAnd"
-    destructAllTest 4 23 "DestructAllMany"
-    destructAllTest 2 18 "DestructAllNonVarTopMatch"
-    destructAllTest 2 18 "DestructAllFunc"
-    destructAllTest 19 18 "DestructAllGADTEvidence"
+    destructAllTest 2 11 "DestructAllAnd.hs"
+    destructAllTest 4 23 "DestructAllMany.hs"
+    destructAllTest 2 18 "DestructAllNonVarTopMatch.hs"
 

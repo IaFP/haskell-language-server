@@ -3,12 +3,7 @@
 
 module Wingman.GHC where
 
-import           Bag (bagToList)
-import           ConLike
-import           Control.Applicative (empty)
 import           Control.Monad.State
-import           Control.Monad.Trans.Maybe (MaybeT(..))
-import           CoreUtils (exprType)
 import           Data.Function (on)
 import           Data.Functor ((<&>))
 import           Data.List (isPrefixOf)
@@ -18,18 +13,10 @@ import           Data.Set (Set)
 import qualified Data.Set as S
 import           Data.Traversable
 import           DataCon
-import           Development.IDE (HscEnvEq (hscEnv))
-import           Development.IDE.Core.Compile (lookupName)
-import           Development.IDE.GHC.Compat hiding (exprType)
-import           DsExpr (dsExpr)
-import           DsMonad (initDs)
-import           FamInst (tcLookupDataFamInst_maybe)
-import           FamInstEnv (normaliseType)
-import           GHC.SourceGen (lambda)
+import           Development.IDE.GHC.Compat
+import           GHC.SourceGen (case', lambda, match)
 import           Generics.SYB (Data, everything, everywhere, listify, mkQ, mkT)
-import           GhcPlugins (extractModule, GlobalRdrElt (gre_name), Role (Nominal))
 import           OccName
-import           TcRnMonad
 import           TcType
 import           TyCoRep
 import           Type
@@ -76,7 +63,7 @@ isFunction _                                    = True
 -- context.
 tacticsSplitFunTy :: Type -> ([TyVar], ThetaType, [Type], Type)
 tacticsSplitFunTy t
-  = let (vars, theta, t') = tcSplitNestedSigmaTys t
+  = let (vars, theta, t') = tcSplitSigmaTy t
         (args, res) = tcSplitFunTys t'
      in (vars, theta, args, res)
 
@@ -119,12 +106,12 @@ freshTyvars t = do
 ------------------------------------------------------------------------------
 -- | Given a datacon, extract its record fields' names and types. Returns
 -- nothing if the datacon is not a record.
-getRecordFields :: ConLike -> Maybe [(OccName, CType)]
+getRecordFields :: DataCon -> Maybe [(OccName, CType)]
 getRecordFields dc =
-  case conLikeFieldLabels dc of
+  case dataConFieldLabels dc of
     [] -> Nothing
     lbls -> for lbls $ \lbl -> do
-      let ty = conLikeFieldType dc $ flLabel lbl
+      (_, ty) <- dataConFieldType_maybe dc $ flLabel lbl
       pure (mkVarOccFS $ flLabel lbl, CType ty)
 
 
@@ -194,18 +181,9 @@ allOccNames = everything (<>) $ mkQ mempty $ \case
 pattern AMatch :: HsMatchContext (NameOrRdrName (IdP GhcPs)) -> [Pat GhcPs] -> HsExpr GhcPs -> Match GhcPs (LHsExpr GhcPs)
 pattern AMatch ctx pats body <-
   Match { m_ctxt = ctx
-        , m_pats = fmap fromPatCompat -> pats
-        , m_grhss = UnguardedRHSs (unLoc -> body)
+        , m_pats = fmap fromPatCompatPs -> pats
+        , m_grhss = UnguardedRHSs body
         }
-
-
-pattern SingleLet :: IdP GhcPs -> [Pat GhcPs] -> HsExpr GhcPs -> HsExpr GhcPs -> HsExpr GhcPs
-pattern SingleLet bind pats val expr <-
-  HsLet _
-    (L _ (HsValBinds _
-      (ValBinds _ (bagToList ->
-        [(L _ (FunBind _ (L _ bind) (MG _ (L _ [L _ (AMatch _ pats val)]) _) _ _))]) _)))
-    (L _ expr)
 
 
 ------------------------------------------------------------------------------
@@ -222,23 +200,23 @@ pattern Lambda pats body <-
 
 ------------------------------------------------------------------------------
 -- | A GRHS that caontains no guards.
-pattern UnguardedRHSs :: LHsExpr p -> GRHSs p (LHsExpr p)
+pattern UnguardedRHSs :: HsExpr GhcPs -> GRHSs GhcPs (LHsExpr GhcPs)
 pattern UnguardedRHSs body <-
-  GRHSs {grhssGRHSs = [L _ (GRHS _ [] body)]}
+  GRHSs {grhssGRHSs = [L _ (GRHS _ [] (L _ body))]}
 
 
 ------------------------------------------------------------------------------
 -- | A match with a single pattern. Case matches are always 'SinglePatMatch'es.
-pattern SinglePatMatch :: PatCompattable p => Pat p -> LHsExpr p -> Match p (LHsExpr p)
+pattern SinglePatMatch :: Pat GhcPs -> HsExpr GhcPs -> Match GhcPs (LHsExpr GhcPs)
 pattern SinglePatMatch pat body <-
-  Match { m_pats = [fromPatCompat -> pat]
+  Match { m_pats = [fromPatCompatPs -> pat]
         , m_grhss = UnguardedRHSs body
         }
 
 
 ------------------------------------------------------------------------------
 -- | Helper function for defining the 'Case' pattern.
-unpackMatches :: PatCompattable p => [Match p (LHsExpr p)] -> Maybe [(Pat p, LHsExpr p)]
+unpackMatches :: [Match GhcPs (LHsExpr GhcPs)] -> Maybe [(Pat GhcPs, HsExpr GhcPs)]
 unpackMatches [] = Just []
 unpackMatches (SinglePatMatch pat body : matches) =
   (:) <$> pure (pat, body) <*> unpackMatches matches
@@ -247,10 +225,13 @@ unpackMatches _ = Nothing
 
 ------------------------------------------------------------------------------
 -- | A pattern over the otherwise (extremely) messy AST for lambdas.
-pattern Case :: PatCompattable p => HsExpr p -> [(Pat p, LHsExpr p)] -> HsExpr p
+pattern Case :: HsExpr GhcPs -> [(Pat GhcPs, HsExpr GhcPs)] -> HsExpr GhcPs
 pattern Case scrutinee matches <-
   HsCase _ (L _ scrutinee)
     (MG {mg_alts = L _ (fmap unLoc -> unpackMatches -> Just matches)})
+  where
+    Case scrutinee matches =
+      case' scrutinee $ fmap (\(pat, body) -> match [pat] body) matches
 
 
 ------------------------------------------------------------------------------
@@ -265,30 +246,20 @@ lambdaCaseable (splitFunTy_maybe -> Just (arg, res))
   = Just $ isJust $ algebraicTyCon res
 lambdaCaseable _ = Nothing
 
-class PatCompattable p where
-  fromPatCompat :: PatCompat p -> Pat p
-  toPatCompat :: Pat p -> PatCompat p
-
+-- It's hard to generalize over these since weird type families are involved.
+fromPatCompatTc :: PatCompat GhcTc -> Pat GhcTc
+toPatCompatTc :: Pat GhcTc -> PatCompat GhcTc
+fromPatCompatPs :: PatCompat GhcPs -> Pat GhcPs
 #if __GLASGOW_HASKELL__ == 808
-instance PatCompattable GhcTc where
-  fromPatCompat = id
-  toPatCompat = id
-
-instance PatCompattable GhcPs where
-  fromPatCompat = id
-  toPatCompat = id
-
 type PatCompat pass = Pat pass
+fromPatCompatTc = id
+fromPatCompatPs = id
+toPatCompatTc = id
 #else
-instance PatCompattable GhcTc where
-  fromPatCompat = unLoc
-  toPatCompat = noLoc
-
-instance PatCompattable GhcPs where
-  fromPatCompat = unLoc
-  toPatCompat = noLoc
-
 type PatCompat pass = LPat pass
+fromPatCompatTc = unLoc
+fromPatCompatPs = unLoc
+toPatCompatTc = noLoc
 #endif
 
 ------------------------------------------------------------------------------
@@ -321,78 +292,4 @@ unXPat :: Pat GhcPs -> Pat GhcPs
 unXPat (XPat (L _ pat)) = unXPat pat
 #endif
 unXPat pat              = pat
-
-
-------------------------------------------------------------------------------
--- | Build a 'KnownThings'.
-knownThings :: TcGblEnv -> HscEnvEq -> MaybeT IO KnownThings
-knownThings tcg hscenv= do
-  let cls = knownClass tcg hscenv
-  KnownThings
-    <$> cls (mkClsOcc "Semigroup")
-    <*> cls (mkClsOcc "Monoid")
-
-
-------------------------------------------------------------------------------
--- | Like 'knownThing' but specialized to classes.
-knownClass :: TcGblEnv -> HscEnvEq -> OccName -> MaybeT IO Class
-knownClass = knownThing $ \case
-  ATyCon tc -> tyConClass_maybe tc
-  _         -> Nothing
-
-
-------------------------------------------------------------------------------
--- | Helper function for defining 'knownThings'.
-knownThing :: (TyThing -> Maybe a) -> TcGblEnv -> HscEnvEq -> OccName -> MaybeT IO a
-knownThing f tcg hscenv occ = do
-  let modul = extractModule tcg
-      rdrenv = tcg_rdr_env tcg
-
-  case lookupOccEnv rdrenv occ of
-    Nothing -> empty
-    Just elts -> do
-      mvar <- lift $ lookupName (hscEnv hscenv) modul $ gre_name $ head elts
-      case mvar of
-        Just tt -> liftMaybe $ f tt
-        _ -> empty
-
-
-liftMaybe :: Monad m => Maybe a -> MaybeT m a
-liftMaybe a = MaybeT $ pure a
-
-
-------------------------------------------------------------------------------
--- | Get the type of an @HsExpr GhcTc@. This is slow and you should prefer to
--- not use it, but sometimes it can't be helped.
-typeCheck :: HscEnv -> TcGblEnv -> HsExpr GhcTc -> IO (Maybe Type)
-typeCheck hscenv tcg = fmap snd . initDs hscenv tcg . fmap exprType . dsExpr
-
-
-mkFunTys' :: [Type] -> Type -> Type
-mkFunTys' =
-#if __GLASGOW_HASKELL__ <= 808
-  mkFunTys
-#else
-  mkVisFunTys
-#endif
-
-
-------------------------------------------------------------------------------
--- | Expand type and data families
-normalizeType :: Context -> Type -> Type
-normalizeType ctx ty =
-  let ty' = expandTyFam ctx ty
-   in case tcSplitTyConApp_maybe ty' of
-        Just (tc, tys) ->
-          -- try to expand any data families
-          case tcLookupDataFamInst_maybe (ctxFamInstEnvs ctx) tc tys of
-            Just (dtc, dtys, _) -> mkAppTys (mkTyConTy dtc) dtys
-            Nothing -> ty'
-        Nothing -> ty'
-
-------------------------------------------------------------------------------
--- | Expand type families
-expandTyFam :: Context -> Type -> Type
-expandTyFam ctx = snd . normaliseType  (ctxFamInstEnvs ctx) Nominal
-
 

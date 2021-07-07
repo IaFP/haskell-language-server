@@ -4,18 +4,18 @@
 {-# LANGUAGE RecordWildCards   #-}
 module Main(main) where
 
-import           Ide.Arguments (Arguments (..), GhcideArguments (..),
-                                getArguments)
+import           Ide.Arguments (Arguments (..), LspArguments (..), getArguments)
 import           Ide.Main      (defaultMain)
+import           Main.Utf8     (withUtf8)
 import           Plugins
 
 main :: IO ()
-main = do
+main = withUtf8 $ do
     args <- getArguments "haskell-language-server"
 
     let withExamples =
             case args of
-                Ghcide GhcideArguments{..} -> argsExamplePlugin
-                _                          -> False
+                LspMode LspArguments{..} -> argsExamplePlugin
+                _                        -> False
 
     defaultMain args (idePlugins withExamples)

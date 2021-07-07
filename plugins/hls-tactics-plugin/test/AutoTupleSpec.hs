@@ -36,7 +36,6 @@ spec = describe "auto for tuple" $ do
           runTactic
             emptyContext
             (mkFirstJudgement
-              emptyContext
               (Hypothesis $ pure $ HyInfo (mkVarOcc "x") UserPrv $ CType in_type)
               True
               out_type)
