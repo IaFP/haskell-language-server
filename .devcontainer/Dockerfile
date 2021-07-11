@@ -1,15 +1,3 @@
-# Notes on devcontainer.json and Docker file:
-# The only thing that might be useful to change in the devcontainer.json file is
-# the remote user name. One is haseller and the other one is VSCode.
-# For Dockerfile, I'll leave comments beginning with NOTE to point out where it
-# could be useful to examine.
-
-# NOTE: the first issue is the base Dockerfile. One is from the VSCode generated
-# Dockerfile, and the other one is a Dockerfile in here:
-# https://github.com/vzarytovskii/haskell-dev-env
-# The VSCode one will set up the vscode user, and the other ones don't.
-# But the VSCode one seems to install more useful packages like vi.
-
 # See here for image contents: https://github.com/microsoft/vscode-dev-containers/tree/v0.177.0/containers/debian/.devcontainer/base.Dockerfile
 
 # [Choice] Debian version: buster, stretch
@@ -20,28 +8,10 @@ FROM mcr.microsoft.com/vscode/devcontainers/base:0-${VARIANT}
 # RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
 #     && apt-get -y install --no-install-recommends <your-package-list-here>
 
-# NOTE: This is the debian Dockerfile
 # FROM debian:stable
 
-ARG GHC_VERSION=8.10.4
+ARG GHC_VERSION=8.10.5
 ARG STACK_RESOLVER=lts-17.7
-
-# NOTE: The second problem is about the user. With VSCode's base Dockerfile, it
-# will produce the best but not perfect result, and in that case the remote user
-# is haskeller. But because of that, it could be that the cabal is installed in
-# haskeller's home address while actually the working directory, and where the
-# hls project has been placed, is under the vscode's directory.
-
-# NOTE: If I change the base to Debian's, remote user to haskeller, so that
-# there does not exist a user called vscode, then what we have to focus on is
-# is the privilege of the haskeller user. But it has the following issue:
-# When I run `./cabal-hls-install hls`, it will call out an error saying that
-# the permission is denied. I guess it is an error of privilege. This is with
-# base Dockerfile Debian's, user haskeller. I can use sudo to run the command,
-# but it says cabal will not be found. I have searched on Stackoverflow, it
-# basically said that this is because issue of sudo, not of cabal. Nevertheless,
-# I didn't found a way to resolve this. And the whole mess could still back to
-# the problem of, how to set up an user properly.
 
 ENV USERNAME=haskeller \
     USER_UID=2001 \
@@ -57,15 +27,6 @@ RUN groupadd --gid $USER_GID $USERNAME && \
     useradd -ms /bin/bash -K MAIL_DIR=/dev/null --uid $USER_UID --gid $USER_GID -m $USERNAME && \
     echo $USERNAME ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/$USERNAME && \
     chmod 0440 /etc/sudoers.d/$USERNAME
-
-
-# NOTE: The final note for this Dockerfile, then has to arrive to the privilege issue.
-# The commands above, seems to set up the privilege of the user. I remember that
-# the groupadd is annoying when I make the user to be only the vscode one. Anyways
-# I never figured out why I might stuck at these commands, and maybe how to
-# separate them apart to analyze. Its original purpose is adding haskeller to a
-# group called haskeller. I have tried to add the haskeller user to root, but I
-# failed.
 
 USER ${USER_UID}:${USER_GID}
 WORKDIR /home/${USERNAME}
@@ -124,8 +85,6 @@ ENV PATH="$PATH:/home/haskeller/.cabal:/home/haskeller/.cabal/bin"
 # Is it necessary?
 # RUN cabal install ghcide --global
 # RUN cabal v2-run /workspace/haskell-language-server/install.hs --project-file install/shake.project <target>
-
-
 
 ENV DEBIAN_FRONTEND=dialog
 

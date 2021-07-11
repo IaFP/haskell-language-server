@@ -9,12 +9,16 @@
 	},
 
 	// Set *default* container specific settings.json values on container create.
-	"settings": { 
-		"terminal.integrated.shell.linux": "/bin/bash"
+	"settings": {
+		"terminal.integrated.shell.linux": "/bin/bash",
+		"haskell.serverExecutablePath": "/home/haskeller/.cabal/bin/haskell-language-server"
 	},
 
 	// Add the IDs of extensions you want installed when the container is created.
 	"extensions": ["haskell.haskell"],
+
+	"workspaceMount": "source=${localWorkspaceFolder},target=/home/haskeller/hls/,type=bind,consistency=delegated",
+	"workspaceFolder": "/home/haskeller/",
 
 	// Use 'forwardPorts' to make a list of ports inside the container available locally.
 	// "forwardPorts": [],
@@ -27,6 +31,5 @@
 
 	// Comment out connect as root instead. More info: https://aka.ms/vscode-remote/containers/non-root.
 	"remoteUser": "haskeller"
-
-	//TODO: ADD HASKELL EXTENSIONS IN THIS FILE
+	
 }
