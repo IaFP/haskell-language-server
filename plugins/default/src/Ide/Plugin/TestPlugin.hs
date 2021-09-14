@@ -37,7 +37,6 @@ import           TcRnTypes                            (TcGblEnv (tcg_used_gres))
 
 -- ---------------------------------------------------------------------
 
-
 lhsCommandId :: CommandId
 lhsCommandId = "lhsGeneratorCommand"
 
@@ -162,16 +161,19 @@ mkExplicitEdit posMapping (L src sig) explicit
             colons = T.pack "::"
             empty = T.pack ""
             pred = T.pack "=>"
+            eqHole = T.pack " = _"
             split = (\(x, y) -> (T.strip x) : (T.splitOn arrow $ remPred $
                         fromJust $ T.stripPrefix colons y)) $ T.breakOn colons explicit 
-            mkFunc t = T.append t (T.pack " = _")
+            mkFunc t = T.append t (eqHole)
             remPred t = (\(x, y) -> fromMaybe x $ T.stripPrefix pred y) $ T.breakOn pred t
-            firsts (x:xs) = x : (uniquify $ map (lowerFirst . abbrev . T.strip) xs)
+            firsts (x:xs) = x : (uniquify $ map lowerFirst $ abbrev $ map T.strip xs)
             firsts [] = []
-            abbrev t = T.concat $ map checkList $ T.words t
-            checkList t = if T.head t == '[' 
-                          then T.snoc (T.singleton $ T.head $ T.drop 1 t) 's' 
-                          else T.singleton $ T.head t
+            abbrev (t:ts) = (T.concat $ checkList $ T.words t) : (abbrev ts)
+            abbrev [] = []
+            checkList (t:ts) = if T.head t == '[' 
+                          then  (T.singleton $ T.head $ T.drop 1 t)  : (checkList ts ++ [T.singleton 's'])
+                          else (T.singleton $ T.head t) : checkList ts
+            checkList [] = []
             lowerFirst t = T.append (T.toLower $ T.singleton $ T.head t) (T.tail t)
             uniquify (x:xs) = (T.snoc x '1') : (uniquify' xs (Map.singleton x 1))
             uniquify [] = []
