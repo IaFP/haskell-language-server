@@ -171,9 +171,14 @@ mkExplicitEdit posMapping (L src sig) explicit
             abbrev (t:ts) = (T.concat $ checkList $ T.words t) : (abbrev ts)
             abbrev [] = []
             checkList (t:ts) = if T.head t == '[' 
-                          then  (T.singleton $ T.head $ T.drop 1 t)  : (checkList ts ++ [T.singleton 's'])
-                          else (T.singleton $ T.head t) : checkList ts
+                          then  (checkParens $ T.drop 1 t)  : (checkList ts ++ [T.singleton 's'])
+                          else (checkParens t) : checkList ts
             checkList [] = []
+            checkParens t
+              |isTuple t = T.pack "sjadi"
+              |T.head t == '(' = (T.singleton $ T.head $ T.drop 1 t)
+              |otherwise = (T.singleton $ T.head t)
+            isTuple t = False
             lowerFirst t = T.append (T.toLower $ T.singleton $ T.head t) (T.tail t)
             uniquify (x:xs) = (T.snoc x '1') : (uniquify' xs (Map.singleton x 1))
             uniquify [] = []
