@@ -162,23 +162,27 @@ mkExplicitEdit posMapping (L src sig) explicit
             empty = T.pack ""
             pred = T.pack "=>"
             eqHole = T.pack " = _"
+            comma = T.pack ","
             split = (\(x, y) -> (T.strip x) : (T.splitOn arrow $ remPred $
                         fromJust $ T.stripPrefix colons y)) $ T.breakOn colons explicit 
             mkFunc t = T.append t (eqHole)
             remPred t = (\(x, y) -> fromMaybe x $ T.stripPrefix pred y) $ T.breakOn pred t
             firsts (x:xs) = x : (uniquify $ map lowerFirst $ abbrev $ map T.strip xs)
             firsts [] = []
-            abbrev (t:ts) = (T.concat $ checkList $ T.words t) : (abbrev ts)
+            abbrev (t:ts) = (T.concat $ checkList t) : (abbrev ts)
             abbrev [] = []
-            checkList (t:ts) = if T.head t == '[' 
-                          then  (checkParens $ T.drop 1 t)  : (checkList ts ++ [T.singleton 's'])
-                          else (checkParens t) : checkList ts
-            checkList [] = []
-            checkParens t
-              |isTuple t = T.pack "sjadi"
-              |T.head t == '(' = (T.singleton $ T.head $ T.drop 1 t)
-              |otherwise = (T.singleton $ T.head t)
-            isTuple t = False
+            checkList t 
+              |T.head t == '[' = (doRecurse (T.drop 1 t)) ++ [T.singleton 's']
+              |T.head t == '(' = checkTuple (T.drop 1 t)
+              |otherwise = doRecurse t
+            doRecurse t
+              |(length $ T.words t) == 1 = [T.singleton $ T.head t]
+              |otherwise =  abbrev $ T.words t
+            checkTuple t
+              |T.any (== ',') t = (T.singleton '(') : (tupleRecurse t) ++ [(T.singleton ')')]
+              |otherwise = doRecurse t
+            tupleRecurse t =   tupleRecurse' $ map T.strip $ T.splitOn comma t 
+            tupleRecurse' ts = [T.intercalate (T.pack ", ") $ map T.concat $ map doRecurse ts]
             lowerFirst t = T.append (T.toLower $ T.singleton $ T.head t) (T.tail t)
             uniquify (x:xs) = (T.snoc x '1') : (uniquify' xs (Map.singleton x 1))
             uniquify [] = []
